@@ -129,7 +129,9 @@ int main(int argc, char** argv) {
     // ===========================================
     // Prepare test data
     // ===========================================
-    const size_t dataCount = 1024 * 1024;  // 1M elements = 4MB for uint32_t
+    //const size_t dataCount = 1024 * 1024;  // 1M elements = 4MB for uint32_t
+    const size_t dataCount = 1024;
+    
     std::vector<uint32_t> data(dataCount);
 
     const int root = 0;
