@@ -295,37 +295,40 @@ void Runner::run(BenchmarkFn<T>& fn, size_t n) {
     
     // New for peel_broadcast!
     // Enable Peel if requested
-    if (options_.enablePeel && i == 0) {
-      auto* tcpCtx = reinterpret_cast<gloo::transport::tcp::Context*>(context.get());
-      if (tcpCtx) {
-        gloo::transport::tcp::peel::PeelContextConfig peelConfig;
-        peelConfig.rank = options_.contextRank;
-        peelConfig.world_size = options_.contextSize;
-        peelConfig.redis_host = options_.redisHost;
-        peelConfig.redis_port = options_.redisPort;
-        peelConfig.mcast_group = options_.peelMcastGroup;
-        peelConfig.base_port = static_cast<uint16_t>(options_.peelMcastPort);
-        peelConfig.redis_prefix = options_.prefix + "_peel";
-        if (!options_.peelIface.empty()) {
-          peelConfig.iface_ip = options_.peelIface;
-        }
-    
-        tcpCtx->enablePeel(peelConfig);
-    
-        if (!tcpCtx->isPeelReady()) {
-          throw std::runtime_error("Failed to initialize Peel");
-        }
-      } else {
-        throw std::runtime_error("Peel requires TCP transport");
-      }
-    }
-    // Verify Peel is ready for subsequent threads
-    if (options_.enablePeel && i > 0) {
-      auto* tcpCtx = reinterpret_cast<gloo::transport::tcp::Context*>(context.get());
-      if (tcpCtx && !tcpCtx->isPeelReady()) {
-        throw std::runtime_error("Peel not initialized for thread " + std::to_string(i));
-      }
-    }
+if (options_.enablePeel && i == 0) {
+  auto transportCtx = context->getTransportContext();
+  auto* tcpCtx = dynamic_cast<gloo::transport::tcp::Context*>(transportCtx.get());
+  if (!tcpCtx) {
+    throw std::runtime_error("Peel requires TCP transport");
+  }
+  
+  gloo::transport::tcp::peel::PeelContextConfig peelConfig;
+  peelConfig.rank = options_.contextRank;
+  peelConfig.world_size = options_.contextSize;
+  peelConfig.redis_host = options_.redisHost;
+  peelConfig.redis_port = options_.redisPort;
+  peelConfig.mcast_group = options_.peelMcastGroup;
+  peelConfig.base_port = static_cast<uint16_t>(options_.peelMcastPort);
+  peelConfig.redis_prefix = options_.prefix + "_peel";
+  if (!options_.peelIface.empty()) {
+    peelConfig.iface_ip = options_.peelIface;
+  }
+
+  tcpCtx->enablePeel(peelConfig);
+
+  if (!tcpCtx->isPeelReady()) {
+    throw std::runtime_error("Failed to initialize Peel");
+  }
+}
+
+// Verify Peel is ready for subsequent threads
+if (options_.enablePeel && i > 0) {
+  auto transportCtx = context->getTransportContext();
+  auto* tcpCtx = dynamic_cast<gloo::transport::tcp::Context*>(transportCtx.get());
+  if (tcpCtx && !tcpCtx->isPeelReady()) {
+    throw std::runtime_error("Peel not initialized for thread " + std::to_string(i));
+  }
+}
     // End for peel_broadcast!
     
     

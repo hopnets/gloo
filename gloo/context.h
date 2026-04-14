@@ -35,6 +35,12 @@ class Context {
 
   std::shared_ptr<transport::Device>& getDevice();
 
+
+  // Add this new method:
+std::shared_ptr<transport::Context> getTransportContext() {
+  return transportContext_;
+}
+
   std::unique_ptr<transport::Pair>& getPair(int i);
 
   // Factory function to create an unbound buffer for use with the
