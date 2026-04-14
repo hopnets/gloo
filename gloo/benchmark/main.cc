@@ -83,9 +83,11 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
   }
 
   void run() override {
-    // Reinterpret cast - assumes context is actually tcp::Context when Peel is enabled
-    auto* tcpContext = reinterpret_cast<gloo::transport::tcp::Context*>(
-        this->context_.get());
+    
+    // Get the transport context properly
+    auto transportCtx = this->context_->getTransportContext();
+    auto* tcpContext = dynamic_cast<gloo::transport::tcp::Context*>(transportCtx.get());
+    
     
     if (!tcpContext->isPeelReady()) {
       throw std::runtime_error("Peel not initialized");
