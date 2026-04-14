@@ -295,7 +295,7 @@ void Runner::run(BenchmarkFn<T>& fn, size_t n) {
     
     // New for peel_broadcast!
     // Enable Peel if requested
-    if (options_.enablePeel) {
+    if (options_.enablePeel && i == 0) {
       auto* tcpCtx = reinterpret_cast<gloo::transport::tcp::Context*>(context.get());
       if (tcpCtx) {
         gloo::transport::tcp::peel::PeelContextConfig peelConfig;
@@ -309,14 +309,21 @@ void Runner::run(BenchmarkFn<T>& fn, size_t n) {
         if (!options_.peelIface.empty()) {
           peelConfig.iface_ip = options_.peelIface;
         }
-
+    
         tcpCtx->enablePeel(peelConfig);
-
+    
         if (!tcpCtx->isPeelReady()) {
-          throw std::runtime_error("Failed to initialize Peel for thread " + std::to_string(i));
+          throw std::runtime_error("Failed to initialize Peel");
         }
       } else {
         throw std::runtime_error("Peel requires TCP transport");
+      }
+    }
+    // Verify Peel is ready for subsequent threads
+    if (options_.enablePeel && i > 0) {
+      auto* tcpCtx = reinterpret_cast<gloo::transport::tcp::Context*>(context.get());
+      if (tcpCtx && !tcpCtx->isPeelReady()) {
+        throw std::runtime_error("Peel not initialized for thread " + std::to_string(i));
       }
     }
     // End for peel_broadcast!
