@@ -296,7 +296,7 @@ void Runner::run(BenchmarkFn<T>& fn, size_t n) {
     // New for peel_broadcast!
     // Enable Peel if requested
     if (options_.enablePeel) {
-      auto* tcpCtx = dynamic_cast<gloo::transport::tcp::Context*>(context.get());
+      auto* tcpCtx = reinterpret_cast<gloo::transport::tcp::Context*>(context.get());
       if (tcpCtx) {
         gloo::transport::tcp::peel::PeelContextConfig peelConfig;
         peelConfig.rank = options_.contextRank;

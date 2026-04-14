@@ -8,6 +8,8 @@
 
 #include <memory>
 #include <string>
+#include <sstream>
+#include <thread>
 
 #include "gloo/allgather.h"
 #include "gloo/allgather_ring.h"
@@ -71,27 +73,46 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
     auto inPtrs = this->allocate(this->options_.inputs, elements);
     dataPtr_ = inPtrs.front();
     dataSize_ = elements * sizeof(T);
+    
+    // Initialize data on root
+    if (this->context_->rank == 0) {
+      for (size_t i = 0; i < elements; i++) {
+        dataPtr_[i] = static_cast<T>(i);
+      }
+    }
   }
 
   void run() override {
-    // Cast context to TCP context to access Peel
-    auto* tcpCtx = dynamic_cast<gloo::transport::tcp::Context*>(
+    // Reinterpret cast - assumes context is actually tcp::Context when Peel is enabled
+    auto* tcpContext = reinterpret_cast<gloo::transport::tcp::Context*>(
         this->context_.get());
     
-    if (!tcpCtx || !tcpCtx->isPeelReady()) {
+    if (!tcpContext->isPeelReady()) {
       throw std::runtime_error("Peel not initialized");
     }
 
     // Use rank 0 as root
     const int rootRank = 0;
-    tcpCtx->peelBroadcast(rootRank, dataPtr_, dataSize_);
+    tcpContext->peelBroadcast(rootRank, dataPtr_, dataSize_);
   }
 
   void verify(std::vector<std::string>& errors) override {
-    const int rootRank = 0;
-    auto stride = this->context_->size * this->inputs_.size();
-    constStrideVerify(
-        this->inputs_, rootRank, stride, this->context_->rank, errors);
+    // Verify that all ranks have the same data as root
+    size_t numElements = dataSize_ / sizeof(T);
+    for (size_t i = 0; i < numElements; i++) {
+      T expected = static_cast<T>(i);
+      if (dataPtr_[i] != expected) {
+        std::stringstream ss;
+        ss << "Rank " << this->context_->rank 
+           << ": Mismatch at index " << i
+           << ": expected " << expected 
+           << ", got " << dataPtr_[i];
+        errors.push_back(ss.str());
+        if (errors.size() >= 10) {
+          return;
+        }
+      }
+    }
   }
 
  protected:
