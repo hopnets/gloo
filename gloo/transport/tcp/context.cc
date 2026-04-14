@@ -32,9 +32,9 @@ Context::Context(std::shared_ptr<Device> device, int rank, int size)
     
     // Explicitly set to nullptr again just to be sure
   peelContext_ = nullptr;
-  std::cerr << "Context constructor called for rank " << rank 
-            << " @ " << this
-            << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";	    
+  //std::cerr << "Context constructor called for rank " << rank 
+  //          << " @ " << this
+  //          << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";	    
     connecting_.resize(size);
 }
 
@@ -427,26 +427,26 @@ std::vector<char> Rank::bytes() const {
 // ---------------------------------------------------------------------------
 
 void Context::enablePeel(const peel::PeelContextConfig& config) {
-    std::cerr << "enablePeel() called on Context @ " << this 
-            << " for rank " << config.rank 
-            << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";
+    //std::cerr << "enablePeel() called on Context @ " << this 
+    //        << " for rank " << config.rank 
+    //        << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";
 
     if (peelContext_) {
     std::cerr << "peel: already enabled\n";
     return;
   }
 
-   std::cerr << "peel: creating new PeelContext...\n";
+   //std::cerr << "peel: creating new PeelContext...\n";
   peelContext_ = std::make_unique<peel::PeelContext>(config);
-   std::cerr << "peel: calling init()...\n";
+   //std::cerr << "peel: calling init()...\n";
   if (!peelContext_->init()) {
     std::cerr << "peel: initialization failed\n";
     peelContext_.reset();
     return;
   }
 
-  std::cerr << "peel: enabled and ready for rank " << config.rank
-            << " (world_size=" << config.world_size << ")\n";
+  //std::cerr << "peel: enabled and ready for rank " << config.rank
+  //          << " (world_size=" << config.world_size << ")\n";
 }
 
 } // namespace tcp

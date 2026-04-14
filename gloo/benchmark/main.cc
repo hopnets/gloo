@@ -83,7 +83,7 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
   }
 
   void run() override {
-    std::cerr << "Rank " << this->context_->rank << ": run() called\n";
+    //std::cerr << "Rank " << this->context_->rank << ": run() called\n";
     // Get the transport context properly
     auto transportCtx = this->context_->getTransportContext();
     auto* tcpContext = dynamic_cast<gloo::transport::tcp::Context*>(transportCtx.get());
@@ -93,12 +93,12 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
       throw std::runtime_error("Peel not initialized");
     }
 
-    std::cerr << "Rank " << this->context_->rank << ": Starting peelBroadcast...\n";
+    //std::cerr << "Rank " << this->context_->rank << ": Starting peelBroadcast...\n";
 
     // Use rank 0 as root
     const int rootRank = 0;
     tcpContext->peelBroadcast(rootRank, dataPtr_, dataSize_);
-    std::cerr << "Rank " << this->context_->rank << ": peelBroadcast completed!\n";
+    //std::cerr << "Rank " << this->context_->rank << ": peelBroadcast completed!\n";
   }
 
   void verify(std::vector<std::string>& errors) override {

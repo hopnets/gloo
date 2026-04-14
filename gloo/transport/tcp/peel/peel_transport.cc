@@ -51,7 +51,7 @@ bool PeelTransport::init() {
         return false;
     }
 
-    std::cerr << "peel_transport[" << config_.rank << "]: ready\n";
+    //std::cerr << "peel_transport[" << config_.rank << "]: ready\n";
     return true;
 }
 
