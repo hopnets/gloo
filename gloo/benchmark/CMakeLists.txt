@@ -7,6 +7,17 @@ set(GLOO_BENCHMARK_SRCS
 add_executable(benchmark ${GLOO_BENCHMARK_SRCS})
 target_link_libraries(benchmark gloo)
 
+# Peel benchmark needs hiredis (PeelDiscovery/PeelRedis use it directly;
+# symbols are not bundled in libgloo.a).
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(HIREDIS hiredis)
+  if(HIREDIS_FOUND)
+    target_link_libraries(benchmark ${HIREDIS_LIBRARIES})
+    target_include_directories(benchmark PRIVATE ${HIREDIS_INCLUDE_DIRS})
+  endif()
+endif()
+
 if(GLOO_INSTALL)
   install(TARGETS benchmark DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 endif()

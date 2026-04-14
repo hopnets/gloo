@@ -37,12 +37,8 @@
 #include "gloo/benchmark/benchmark.h"
 #include "gloo/benchmark/runner.h"
 
-
-// New for peel_broadcast!
-#include "gloo/transport/tcp/context.h"
 #include "gloo/transport/tcp/peel/peel_context.h"
-// End for peel_broadcast!
-
+#include "gloo/transport/tcp/peel/peel_discovery.h"
 
 using namespace gloo;
 using namespace gloo::benchmark;
@@ -51,57 +47,6 @@ namespace {
 
 // constant offset used for alltoall when populating input data
 constexpr int kAlltoallOffset = 127;
-
-
-
-// New for peel_broadcast!
-// Peel broadcast benchmark
-template <typename T>
-class PeelBroadcastBenchmark : public Benchmark<T> {
-  using Benchmark<T>::Benchmark;
-
- public:
-  PeelBroadcastBenchmark(
-      std::shared_ptr<::gloo::Context>& context,
-      struct options& options)
-      : Benchmark<T>(context, options) {}
-
-  void initialize(size_t elements) override {
-    // Allocate input buffer
-    auto inPtrs = this->allocate(this->options_.inputs, elements);
-    dataPtr_ = inPtrs.front();
-    dataSize_ = elements * sizeof(T);
-  }
-
-  void run() override {
-    // Cast context to TCP context to access Peel
-    auto* tcpCtx = dynamic_cast<gloo::transport::tcp::Context*>(
-        this->context_.get());
-    
-    if (!tcpCtx || !tcpCtx->isPeelReady()) {
-      throw std::runtime_error("Peel not initialized");
-    }
-
-    // Use rank 0 as root
-    const int rootRank = 0;
-    tcpCtx->peelBroadcast(rootRank, dataPtr_, dataSize_);
-  }
-
-  void verify(std::vector<std::string>& errors) override {
-    const int rootRank = 0;
-    auto stride = this->context_->size * this->inputs_.size();
-    constStrideVerify(
-        this->inputs_, rootRank, stride, this->context_->rank, errors);
-  }
-
- protected:
-  T* dataPtr_;
-  size_t dataSize_;
-};
-// End of peel_broadcast!
-
-
-
 // constant slot used for send/recv
 constexpr uint64_t kSlot = 0x1337;
 // exact number of processes needed for send/recv benchmarks
@@ -973,6 +918,93 @@ class NewAllreduceBenchmark : public Benchmark<T> {
   allocation outputAllocation_;
 };
 
+template <typename T>
+class PeelBroadcastBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+  std::vector<T> data_;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_broadcast requires --peel-iface");
+    GLOO_ENFORCE(
+        !this->options_.peelTopologyFile.empty(),
+        "peel_broadcast requires --peel-topology-file");
+
+    data_.resize(elements);
+    if (this->context_->rank == this->options_.peelSenderRank) {
+      for (size_t i = 0; i < elements; i++) {
+        data_[i] = static_cast<T>(i);
+      }
+    } else {
+      std::fill(data_.begin(), data_.end(), T(0));
+    }
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) return;
+
+    transport::tcp::peel::PeelDiscoveryConfig dc;
+    dc.rank         = this->context_->rank;
+    dc.world_size   = this->context_->size;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 30000;
+
+    transport::tcp::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::tcp::peel::PeelContextConfig cfg;
+    cfg.rank          = this->context_->rank;
+    cfg.world_size    = this->context_->size;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = this->options_.peelSenderRank;
+    cfg.topology_file = this->options_.peelTopologyFile;
+
+    sharedCtx_ = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(sharedCtx_->init(), "PeelContext init failed");
+  }
+
+  void run() override {
+    sharedCtx_->broadcast(
+        this->options_.peelSenderRank,
+        data_.data(),
+        data_.size() * sizeof(T));
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    for (size_t i = 0; i < data_.size(); i++) {
+      T expected = static_cast<T>(i);
+      if (data_[i] != expected) {
+        std::stringstream ss;
+        ss << "Rank " << this->context_->rank
+           << ": mismatch at index " << i
+           << ": expected " << expected
+           << ", got " << data_[i];
+        errors.push_back(ss.str());
+        if (errors.size() >= 10) return;
+      }
+    }
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::tcp::peel::PeelContext>
+    PeelBroadcastBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelBroadcastBenchmark<T>::initMutex_;
+
 } // namespace
 
 #define RUN_BENCHMARK(T)                                                       \
@@ -1021,10 +1053,6 @@ class NewAllreduceBenchmark : public Benchmark<T> {
   } else if (x.benchmark == "alltoall_v") {                                    \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<AllToAllvBenchmark<T>>(context, x);             \
-    };                                                                         \
-  } else if (x.benchmark == "peel_broadcast") {                                \
-    fn = [&](std::shared_ptr<Context>& context) {                              \
-      return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
     };                                                                         \
   } else if (x.benchmark == "barrier_all_to_all") {                            \
     fn = [&](std::shared_ptr<Context>& context) {                              \
@@ -1084,6 +1112,10 @@ class NewAllreduceBenchmark : public Benchmark<T> {
         x.contextSize);                                                        \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<SendRecvStressBenchmark<T>>(context, x, true);  \
+    };                                                                         \
+  } else if (x.benchmark == "peel_broadcast") {                                \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
     };                                                                         \
   }                                                                            \
   if (!fn) {                                                                   \
