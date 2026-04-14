@@ -29,7 +29,9 @@ constexpr int kDefaultBatchSize = 128;
 Context::Context(std::shared_ptr<Device> device, int rank, int size)
     : ::gloo::transport::Context(rank, size), device_(std::move(device)),
     peelContext_(nullptr) {
-  connecting_.resize(size);
+              std::cerr << "Context constructor called for rank " << rank 
+            << ", peelContext_ initialized to nullptr\n";
+	    connecting_.resize(size);
 }
 
 Context::~Context() {
@@ -421,12 +423,18 @@ std::vector<char> Rank::bytes() const {
 // ---------------------------------------------------------------------------
 
 void Context::enablePeel(const peel::PeelContextConfig& config) {
-  if (peelContext_) {
+    std::cerr << "enablePeel() called on Context @ " << this 
+            << " for rank " << config.rank 
+            << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";
+
+    if (peelContext_) {
     std::cerr << "peel: already enabled\n";
     return;
   }
 
+   std::cerr << "peel: creating new PeelContext...\n";
   peelContext_ = std::make_unique<peel::PeelContext>(config);
+   std::cerr << "peel: calling init()...\n";
   if (!peelContext_->init()) {
     std::cerr << "peel: initialization failed\n";
     peelContext_.reset();
