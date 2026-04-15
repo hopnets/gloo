@@ -77,10 +77,12 @@ bool PeelTree::loadTopology(const std::string& path) {
 }
 
 bool PeelTree::build() {
-    // Root of the collective tree is always rank 0.
-    auto src_it = config_.peer_ips.find(0);
+    // Root of the collective tree is config_.sender_rank (default 0 for broadcast;
+    // set to each rank's own index when building per-rank trees for allgather).
+    auto src_it = config_.peer_ips.find(config_.sender_rank);
     if (src_it == config_.peer_ips.end()) {
-        std::cerr << "peel_tree[" << config_.rank << "]: rank 0 IP not in peer_ips\n";
+        std::cerr << "peel_tree[" << config_.rank << "]: sender_rank "
+                  << config_.sender_rank << " IP not in peer_ips\n";
         return false;
     }
     const std::string& source_ip = src_it->second;
@@ -88,7 +90,8 @@ bool PeelTree::build() {
     auto node_it = nodes_.find(source_ip);
     if (node_it == nodes_.end()) {
         std::cerr << "peel_tree[" << config_.rank
-                  << "]: source IP " << source_ip << " not found in topology\n";
+                  << "]: source IP " << source_ip << " (rank "
+                  << config_.sender_rank << ") not found in topology\n";
         return false;
     }
     Node* source = node_it->second.get();
@@ -519,15 +522,19 @@ bool PeelTree::partitionSubtrees(
             sub.subtree_id     = static_cast<int>(subtrees_.size());
             sub.receiver_ranks = r.ranks;
 
-            // Rank 0 (source) sends on every subtree but is never added to any
-            // record during the bottom-up traversal (it sits above all switches).
-            // Add it explicitly so PeelFullMesh includes it in every mesh.
-            sub.receiver_ranks.push_back(0);
+            // The sender (source) sits above all switches and is never added to
+            // any record during the bottom-up traversal.  Add it explicitly so
+            // PeelFullMesh includes it in every subtree's mesh.
+            sub.receiver_ranks.push_back(config_.sender_rank);
 
-            // Each subtree occupies world_size ports starting from its own
-            // offset so that no two subtrees share a port number on any rank.
+            // Port formula (non-overlapping across both subtrees and senders):
+            //   base_port
+            //   + sender_rank * world_size * world_size   (isolates each sender's trees)
+            //   + subtree_id  * world_size                (isolates subtrees within a tree)
             sub.base_port = static_cast<uint16_t>(
-                config_.base_port + sub.subtree_id * config_.world_size);
+                config_.base_port
+                + config_.sender_rank * config_.world_size * config_.world_size
+                + sub.subtree_id * config_.world_size);
 
             // Pack the 48-bit mac (stored in low 48 bits of uint64_t) into
             // cidr_rules_mac[6] in big-endian order (byte 0 = MSB).

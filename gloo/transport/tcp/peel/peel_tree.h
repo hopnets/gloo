@@ -78,11 +78,23 @@ struct PeelTreeConfig {
     int rank       = 0;
     int world_size = 1;
 
+    // Rank that acts as the data source (broadcast root) for this tree.
+    // The spanning tree is rooted at this rank's IP. Defaults to 0
+    // Set to a different rank for allgather, where each rank builds a
+    // tree rooted at itself.
+    int sender_rank = 0;
+
     // Unicast IP for every rank, populated by PeelDiscovery before tree
     // construction. Key: rank, Value: dotted-decimal string (e.g. "10.0.0.1").
     std::unordered_map<int, std::string> peer_ips;
 
     // Base UDP port; each subtree derives its own port range from this.
+    // Port formula: base_port + sender_rank * world_size * world_size
+    //                         + subtree_id  * world_size
+    // This ensures port ranges are non-overlapping across both sender trees
+    // (for allgather) and subtrees within one tree (for topology-aware broadcast).
+    // For large world sizes with allgather, use a smaller base_port to stay
+    // within uint16_t range (e.g. base_port=10000 for world_size<=32).
     uint16_t base_port = PEEL_DEFAULT_BASE_PORT;
 
     // Optional path to a topology file (adjacency matrix, rack/switch map, etc.).
@@ -126,11 +138,10 @@ public:
     const std::vector<PeelSubtree>& subtrees() const { return subtrees_; }
 
     // The subtree this rank belongs to as a receiver.
-    // Rank 0 (source) is added to every subtree's receiver_ranks during
-    // partitionSubtrees(), so it will return 0 (the first subtree found).
-    // peel_context.cc never calls this for rank 0 — it creates transports for
-    // ALL subtrees when config_.rank == 0 regardless of this value.
-    // Non-zero ranks appear in exactly one subtree and return that subtree's id.
+    // The sender_rank (source) is added to every subtree's receiver_ranks during
+    // partitionSubtrees(). peel_context.cc never calls this for the sender rank
+    // — it creates transports for ALL subtrees when config_.rank == sender_rank.
+    // All other ranks appear in exactly one subtree and return that subtree's id.
     int mySubtreeId() const { return my_subtree_id_; }
 
 private:

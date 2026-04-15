@@ -58,6 +58,7 @@ bool PeelContext::init() {
     PeelTreeConfig treeConfig;
     treeConfig.rank          = config_.rank;
     treeConfig.world_size    = config_.world_size;
+    treeConfig.sender_rank   = config_.sender_rank;
     treeConfig.peer_ips      = config_.peer_ips;
     treeConfig.base_port     = config_.base_port;
     treeConfig.topology_file = config_.topology_file;
