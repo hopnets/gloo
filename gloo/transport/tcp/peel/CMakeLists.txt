@@ -53,3 +53,13 @@ target_include_directories(test_peel_broadcast PRIVATE
     ${HIREDIS_INCLUDE_DIRS}
 )
 target_compile_definitions(test_peel_broadcast PRIVATE GLOO_USE_REDIS=1)
+
+# Test: Peel Allgather (N parallel broadcasts)
+add_executable(test_peel_allgather test_peel_allgather.cc)
+target_link_libraries(test_peel_allgather gloo ${HIREDIS_LIBRARIES})
+target_include_directories(test_peel_allgather PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${HIREDIS_INCLUDE_DIRS}
+)
+target_compile_definitions(test_peel_allgather PRIVATE GLOO_USE_REDIS=1)
+

@@ -1,9 +1,10 @@
-10.169.155.11 switch_0
-switch_0 switch_1 switch_2 10.169.155.11
-10.169.156.11 switch_1
-10.169.156.12 switch_1
-switch_1 10.169.156.11 10.169.156.12
+10.169.155.12 switch_0
+switch_0 switch_1 10.169.155.12
+switch_1 switch_2 switch_3 switch_4 switch_5 switch_6 switch_7 switch_8 switch_0
 10.169.157.11 switch_2
 10.169.157.12 switch_2
 switch_2 10.169.157.11 10.169.157.12
+10.169.156.11 switch_3
+10.169.156.12 switch_3
+switch_3 10.169.156.11 10.169.156.12
 
