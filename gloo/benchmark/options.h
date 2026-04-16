@@ -69,7 +69,7 @@ struct options {
   std::string peelMcastGroup   = "239.255.0.1";
   std::string peelIface;
   int         peelBasePort     = 50000;
-  int         peelTTL          = 3;
+  int         peelTTL          = 64;
   int         peelSenderRank   = 0;
   std::string peelTopologyFile;
 };
