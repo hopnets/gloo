@@ -358,8 +358,10 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
     if (!ch || ch->fd < 0) return -1;
 
     auto* out = static_cast<uint8_t*>(data);
-    size_t received = 0;
-    bool   done     = false;
+    size_t   received     = 0;
+    bool     done         = false;
+    bool     seq_init     = false;  // true once we've seen FLG_SYN for this broadcast
+    uint32_t expected_seq = 0;      // next seq we expect from sender
 
     auto deadline = Clock::now() + std::chrono::milliseconds(
         timeout_ms > 0 ? timeout_ms : 30000);
@@ -399,6 +401,38 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
         uint16_t flags = ntohs(hdr.flags);
         if (!(flags & FLG_DATA)) continue;
 
+        uint32_t pkt_seq = ntohl(hdr.seq);
+
+        // ── Sequence deduplication ───────────────────────────────────────────
+        // The sender uses stop-and-wait with retransmits.  If the same chunk
+        // is retransmitted (its seq equals the one we already copied), blindly
+        // appending it would corrupt the buffer and advance `received` past the
+        // correct offset.  We use FLG_SYN to anchor the expected_seq at the
+        // start of every broadcast, then accept only in-order chunks.
+        //
+        // For any out-of-order or duplicate packet we still send an ACK so the
+        // sender does not keep retransmitting indefinitely.
+        if (!seq_init) {
+            if (!(flags & FLG_SYN)) {
+                // Pre-broadcast stale packet from a previous iteration —
+                // ACK it so the sender stops, but do not copy any data.
+                sendAck(src_ip, ntohs(hdr.src_port), sender_mac,
+                        pkt_seq, ntohl(hdr.tsval), hdr.retrans_id);
+                continue;
+            }
+            expected_seq = pkt_seq;
+            seq_init     = true;
+        }
+
+        if (pkt_seq != expected_seq) {
+            // Retransmit of an already-received chunk, or a genuinely
+            // out-of-order packet.  ACK it and skip the data copy.
+            sendAck(src_ip, ntohs(hdr.src_port), sender_mac,
+                    pkt_seq, ntohl(hdr.tsval), hdr.retrans_id);
+            continue;
+        }
+        // ── end dedup ────────────────────────────────────────────────────────
+
         size_t app_len = plen - PEEL_HEADER_SIZE;
         if (received + app_len > max_size)
             app_len = max_size - received;
@@ -410,9 +444,10 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
 
         // Send unicast ACK back to sender using learned MAC
         sendAck(src_ip, ntohs(hdr.src_port), sender_mac,
-                ntohl(hdr.seq), ntohl(hdr.tsval), hdr.retrans_id);
+                pkt_seq, ntohl(hdr.tsval), hdr.retrans_id);
 
         if (flags & FLG_FIN) done = true;
+        ++expected_seq;
     }
 
     return done ? static_cast<ssize_t>(received) : -1;
