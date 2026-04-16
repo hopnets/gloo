@@ -925,8 +925,6 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
   static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
   static std::mutex initMutex_;
 
-  std::vector<T> data_;
-
  public:
   void initialize(size_t elements) override {
     GLOO_ENFORCE(
@@ -936,14 +934,12 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
         !this->options_.peelTopologyFile.empty(),
         "peel_broadcast requires --peel-topology-file");
 
-    data_.resize(elements);
-    if (this->context_->rank == this->options_.peelSenderRank) {
-      for (size_t i = 0; i < elements; i++) {
-        data_[i] = static_cast<T>(i);
-      }
-    } else {
-      std::fill(data_.begin(), data_.end(), T(0));
-    }
+    // Use allocate() — same as BroadcastBenchmark. Fills this->inputs_[0]
+    // with the stride pattern: inputs_[0][i] = i*stride + rank.
+    // After broadcast from peelSenderRank, every rank must hold the sender's
+    // pattern (i*stride + senderRank), so a silent no-op is detectable on
+    // every rank at every index.
+    this->allocate(this->options_.inputs, elements);
 
     std::lock_guard<std::mutex> lock(initMutex_);
     if (sharedCtx_) return;
@@ -978,23 +974,20 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
   void run() override {
     sharedCtx_->broadcast(
         this->options_.peelSenderRank,
-        data_.data(),
-        data_.size() * sizeof(T));
+        this->inputs_[0].data(),
+        this->inputs_[0].size() * sizeof(T));
   }
 
   void verify(std::vector<std::string>& errors) override {
-    for (size_t i = 0; i < data_.size(); i++) {
-      T expected = static_cast<T>(i);
-      if (data_[i] != expected) {
-        std::stringstream ss;
-        ss << "Rank " << this->context_->rank
-           << ": mismatch at index " << i
-           << ": expected " << expected
-           << ", got " << data_[i];
-        errors.push_back(ss.str());
-        if (errors.size() >= 10) return;
-      }
-    }
+    // Identical to BroadcastBenchmark::verify — stride pattern rooted at
+    // peelSenderRank. constStrideVerify checks inputs_[0][i] == i*stride + base.
+    const auto stride = this->context_->size * this->inputs_.size();
+    constStrideVerify(
+        this->inputs_,
+        this->options_.peelSenderRank,
+        stride,
+        this->context_->rank,
+        errors);
   }
 };
 
