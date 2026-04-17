@@ -112,7 +112,8 @@ static void usage(int status, const char* argv0) {
   X("  sendrecv_stress");
   X("  isendirecv_stress");
   X("  peel_broadcast");
-  X(" broadcast_ring");
+  X("  peel_broadcast_ring");
+  X("  broadcast_ring");
   X("");
 
   exit(status);

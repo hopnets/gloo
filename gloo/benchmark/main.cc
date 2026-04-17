@@ -1008,6 +1008,65 @@ std::shared_ptr<transport::tcp::peel::PeelContext>
 template <typename T>
 std::mutex PeelBroadcastBenchmark<T>::initMutex_;
 
+template <typename T>
+class PeelBroadcastRingBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_broadcast_ring requires --peel-iface");
+
+    this->allocate(this->options_.inputs, elements);
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) return;
+
+    transport::tcp::peel::PeelContextConfig cfg;
+    cfg.rank          = this->context_->rank;
+    cfg.world_size    = this->context_->size;
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = this->options_.peelSenderRank;
+    cfg.timeout_ms    = 30000;
+
+    sharedCtx_ = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+  }
+
+  void run() override {
+    GLOO_ENFORCE(
+        sharedCtx_->broadcastRing(
+            this->options_.peelSenderRank,
+            this->inputs_[0].data(),
+            this->inputs_[0].size() * sizeof(T)),
+        "Peel ring broadcast failed");
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const auto stride = this->context_->size * this->inputs_.size();
+    constStrideVerify(
+        this->inputs_,
+        this->options_.peelSenderRank,
+        stride,
+        this->context_->rank,
+        errors);
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::tcp::peel::PeelContext>
+    PeelBroadcastRingBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelBroadcastRingBenchmark<T>::initMutex_;
+
 } // namespace
 
 #define RUN_BENCHMARK(T)                                                       \

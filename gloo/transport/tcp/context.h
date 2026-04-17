@@ -63,7 +63,16 @@ class Context : public ::gloo::transport::Context,
     if (!isPeelReady()) return false;
     return peelContext_->broadcast(root, data, size);
   }
-
+  
+  // Convenience: perform ring broadcast using Peel hop transports
+  // - root: rank that starts the ring broadcast
+  // - data: buffer (root sends, others receive/forward)
+  // - size: number of bytes
+  bool peelBroadcastRing(int root, void* data, size_t size) {
+    if (!isPeelReady()) return false;
+    return peelContext_->broadcastRing(root, data, size);
+  }
+  
   // Cleanup Peel resources
   void disablePeel() {
     if (peelContext_) {

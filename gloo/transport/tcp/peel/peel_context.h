@@ -4,6 +4,7 @@
 
 #include "peel_broadcast.h"
 #include "peel_transport.h"
+#include "peel_broadcast_ring.h"
 
 #include <memory>
 #include <string>
@@ -75,6 +76,9 @@ public:
 
     // Broadcast via PeelBroadcast (parallel across all subtree transports).
     bool broadcast(int root, void* data, size_t size);
+	
+	bool broadcastRing(int root, void* data, size_t size);
+    bool initRing();
 
     // Cleanup all transports.
     void cleanup();
@@ -91,6 +95,8 @@ private:
     PeelContextConfig                           config_;
     std::vector<std::unique_ptr<PeelTransport>> transports_;
     std::unique_ptr<PeelBroadcast>              broadcast_;
+    std::vector<std::unique_ptr<PeelTransport>> ring_transports_;
+    std::unique_ptr<PeelBroadcastRing>          broadcast_ring_;
 };
 
 } // namespace peel

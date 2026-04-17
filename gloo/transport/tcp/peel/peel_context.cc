@@ -150,6 +150,53 @@ bool PeelContext::initSingleTransport() {
     return true;
 }
 
+bool PeelContext::initRing() {
+    ring_transports_.clear();
+    broadcast_ring_.reset();
+
+    if (config_.world_size <= 1) {
+        return true;
+    }
+
+    std::vector<PeelRingHop> hops;
+    hops.reserve(config_.world_size - 1);
+
+    for (int sender = 0; sender < config_.world_size; ++sender) {
+        const int receiver = (sender + 1) % config_.world_size;
+
+        // Skip the closing edge so broadcast remains N-1 hops, not N.
+        // We stop at sender = world_size-2 for root=0 virtual ordering,
+        // but easier is to create all N edges and just execute N-1 of them.
+        // Cleaner baseline: create all N edges.
+        PeelTransportConfig tc = makeBaseTransportConfig(config_);
+        tc.participant_ranks = {sender, receiver};
+        tc.sender_rank = sender;
+        tc.base_port = static_cast<uint16_t>(
+            config_.base_port + sender * config_.world_size);
+
+        auto t = std::make_unique<PeelTransport>(tc);
+        if (!t->init()) {
+            std::cerr << "peel_context[" << config_.rank
+                      << "]: ring hop transport init failed for "
+                      << sender << " -> " << receiver << "\n";
+            return false;
+        }
+
+        hops.push_back({sender, receiver, t.get()});
+        ring_transports_.push_back(std::move(t));
+    }
+
+    broadcast_ring_ = std::make_unique<PeelBroadcastRing>(std::move(hops));
+
+    std::cout << "peel_context[" << config_.rank
+              << "]: initialized ring transports ("
+              << ring_transports_.size() << " hop transport(s))\n";
+    return true;
+}
+bool PeelContext::broadcastRing(int root, void* data, size_t size) {
+    if (!broadcast_ring_) return false;
+    return broadcast_ring_->run(root, data, size);
+}
 // ---------------------------------------------------------------------------
 // isReady / broadcast / cleanup
 // ---------------------------------------------------------------------------
@@ -172,6 +219,11 @@ void PeelContext::cleanup() {
     for (auto& t : transports_)
         t->cleanup();
     transports_.clear();
+	
+	broadcast_ring_.reset();
+    for (auto& t : ring_transports_)
+        t->cleanup();
+    ring_transports_.clear();
 }
 
 } // namespace peel

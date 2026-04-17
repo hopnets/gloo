@@ -63,3 +63,10 @@ target_include_directories(test_peel_allgather PRIVATE
 )
 target_compile_definitions(test_peel_allgather PRIVATE GLOO_USE_REDIS=1)
 
+add_executable(test_peel_broadcast_ring test_peel_broadcast_ring.cc)
+target_link_libraries(test_peel_broadcast_ring gloo ${HIREDIS_LIBRARIES})
+target_include_directories(test_peel_broadcast_ring PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${HIREDIS_INCLUDE_DIRS}
+)
+target_compile_definitions(test_peel_broadcast_ring PRIVATE GLOO_USE_REDIS=1)
