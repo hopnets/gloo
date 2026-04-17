@@ -15,6 +15,7 @@ list(APPEND GLOO_SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/alltoallv.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/barrier.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/broadcast.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/broadcast_ring.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/context.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/gather.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/gatherv.cc"

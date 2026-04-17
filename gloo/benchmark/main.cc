@@ -548,6 +548,16 @@ class BroadcastOneToAllBenchmark : public Benchmark<T> {
 };
 
 template <typename T>
+class BroadcastRingBenchmark : public BroadcastBenchmark<T> {
+  using BroadcastBenchmark<T>::BroadcastBenchmark;
+
+ public:
+  void run() override {
+    broadcast_ring(this->opts_);
+  }
+};
+
+template <typename T>
 class PairwiseExchangeBenchmark : public Benchmark<T> {
   using Benchmark<T>::Benchmark;
 
@@ -1058,6 +1068,10 @@ std::mutex PeelBroadcastBenchmark<T>::initMutex_;
   } else if (x.benchmark == "broadcast") {                                     \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<BroadcastBenchmark<T>>(context, x);             \
+    };                                                                         \
+  } else if (x.benchmark == "broadcast_ring") {                                \
+    fn = [&](std::shared_ptr<::gloo::Context>& context) {                      \
+      return gloo::make_unique<BroadcastRingBenchmark<T>>(context, x);         \
     };                                                                         \
   } else if (x.benchmark == "broadcast_one_to_all") {                          \
     fn = [&](std::shared_ptr<Context>& context) {                              \
