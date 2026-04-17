@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
 
     // Fixed prefix so ranks from different test runs don't accidentally merge.
     // Change this prefix between test runs if you see stale data issues.
-    std::string prefix = "peel_test_fixed";
+    std::string prefix = "peel_ring_test_fixed";
     auto store = std::make_shared<gloo::rendezvous::PrefixStore>(prefix, redisStore);
 
     std::cout << "[PEEL] Rank " << rank << ": Redis prefix = '" << prefix << "'\n";
@@ -247,15 +247,17 @@ int main(int argc, char** argv) {
                                                    : peelConfig.topology_file)
               << "\n";
 
-    tcpCtx->enablePeel(peelConfig);
-
-    if (!tcpCtx->isPeelReady()) {
+    // For peel_broadcast_ring, initialize the ring path directly.
+    // tcpCtx->enablePeel(peelConfig) initializes the normal peel_broadcast path,
+    // not the ring-only hop transports used here.
+    gloo::transport::tcp::peel::PeelContext peelRingContext(peelConfig);
+    if (!peelRingContext.initRing()) {
         std::cerr << "[PEEL] Rank " << rank
-                  << ": ERROR — Peel init failed (check peel_tree / peel_full_mesh logs above)\n";
+                  << ": ERROR — Peel ring init failed (check peel_full_mesh logs above)\n";
         return 1;
     }
 
-    std::cout << "[PEEL] Rank " << rank << ": Peel initialized and ready ✓\n";
+    std::cout << "[PEEL] Rank " << rank << ": Peel ring initialized and ready ✓\n";
 
     // =========================================================================
     // Step 6: Prepare test data
@@ -301,15 +303,15 @@ int main(int argc, char** argv) {
     // Expected log pattern (non-zero rank):
     //   peel_transport[R]: ready
     // =========================================================================
-    std::cout << "\n[PEEL] ====== STEP 7: Broadcast ======\n";
+    std::cout << "\n[PEEL] ====== STEP 7: Ring Broadcast ======\n";
 
     auto startTime = Clock::now();
-    bool ok = tcpCtx->peelBroadcastRing(root, data.data(), dataBytes);
+    bool ok = peelRingContext.broadcastRing(root, data.data(), dataBytes);
     auto endTime   = Clock::now();
 
     if (!ok) {
         std::cerr << "[PEEL] Rank " << rank
-                  << ": ERROR — broadcast returned false "
+                  << ": ERROR — ring broadcast returned false "
                      "(check for timeout / socket errors above)\n";
         return 1;
     }
@@ -324,7 +326,7 @@ int main(int argc, char** argv) {
                               (durationUs / 1e6) / (1024.0 * 1024.0);
 
     std::cout << "\n[PEEL] ====== STEP 8: Timing ======\n";
-    std::cout << "[PEEL] Rank " << rank << ": broadcast completed in "
+    std::cout << "[PEEL] Rank " << rank << ": ring broadcast completed in "
               << durationMs << " ms  (" << throughputMBps << " MB/s)\n";
 
     // =========================================================================
