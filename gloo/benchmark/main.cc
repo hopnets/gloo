@@ -1183,9 +1183,13 @@ std::mutex PeelBroadcastRingBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
     };                                                                         \
+  } else if (x.benchmark == "peel_broadcast_ring") {                           \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelBroadcastRingBenchmark<T>>(context, x);     \
+    };                                                                         \
   }                                                                            \
   if (!fn) {                                                                   \
-    GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                   \
+  GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                   \
   }                                                                            \
   Runner r(x);                                                                 \
   r.run(fn);
