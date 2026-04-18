@@ -37,6 +37,7 @@
 #include "gloo/benchmark/benchmark.h"
 #include "gloo/benchmark/runner.h"
 
+#include "gloo/transport/tcp/peel/peel_allgather.h"
 #include "gloo/transport/tcp/peel/peel_context.h"
 #include "gloo/transport/tcp/peel/peel_discovery.h"
 
@@ -933,6 +934,15 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
     GLOO_ENFORCE(
         !this->options_.peelTopologyFile.empty(),
         "peel_broadcast requires --peel-topology-file");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_broadcast does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent broadcasts)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_broadcast requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
 
     // Use allocate() — same as BroadcastBenchmark. Fills this->inputs_[0]
     // with the stride pattern: inputs_[0][i] = i*stride + rank.
@@ -966,6 +976,7 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
     cfg.ttl           = this->options_.peelTTL;
     cfg.sender_rank   = this->options_.peelSenderRank;
     cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
 
     sharedCtx_ = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
     GLOO_ENFORCE(sharedCtx_->init(), "PeelContext init failed");
@@ -997,6 +1008,168 @@ std::shared_ptr<transport::tcp::peel::PeelContext>
 
 template <typename T>
 std::mutex PeelBroadcastBenchmark<T>::initMutex_;
+
+// =============================================================================
+// PeelAllgatherBenchmark
+//
+// Runs world_size sequential or parallel peel broadcasts — one per sender rank
+// — so that after each run() every rank holds every other rank's data.
+//
+// Buffer layout:
+//   bufPtrs_[rank]  → inputs_[0].data()  (aligned, stride-filled via allocate)
+//   bufPtrs_[r≠rank] → recvBufs_[r].data() (zeroed, overwritten by allgather)
+//
+// Send buffer pattern (from allocate(1, elements)):
+//   inputs_[0][i] = i * worldSize + rank
+//
+// After allgather every bufPtrs_[r][i] must equal i * worldSize + r.
+// This makes every element unique across all ranks and all indices, so
+// element-level corruption is always detected.
+// =============================================================================
+template <typename T>
+class PeelAllgatherBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  // Shared across the benchmark lifetime (threads=1 enforced).
+  static std::shared_ptr<transport::tcp::peel::PeelAllgather>            sharedAllgather_;
+  static std::vector<std::shared_ptr<transport::tcp::peel::PeelContext>> sharedCtxs_;
+  static std::mutex                                                       initMutex_;
+
+  // Per-instance buffers reset on each initialize() call.
+  std::vector<std::vector<T>> recvBufs_; // one zeroed buffer per r != rank
+  std::vector<void*>          bufPtrs_;  // [rank]=inputs_[0], [r≠rank]=recvBufs_[r]
+  size_t                      dataBytes_ = 0;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_allgather requires --peel-iface");
+    GLOO_ENFORCE(
+        !this->options_.peelTopologyFile.empty(),
+        "peel_allgather requires --peel-topology-file");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_allgather does not support --threads > 1");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_allgather requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
+
+    const int rank      = this->context_->rank;
+    const int worldSize = this->context_->size;
+    dataBytes_ = elements * sizeof(T);
+
+    // allocate(1, elements) fills inputs_[0] with the stride pattern:
+    //   inputs_[0][i] = i * (worldSize * 1) + (rank * 1 + 0) = i*worldSize + rank
+    // Uses aligned_allocator, matching the framework convention used by
+    // AllgatherBenchmark, BroadcastBenchmark, etc.
+    auto inPtrs = this->allocate(1, elements);
+
+    // Zeroed receive buffers for every rank that is not this rank.
+    // The allgather will overwrite these with the sender's data.
+    recvBufs_.assign(worldSize, std::vector<T>(elements, T(0)));
+
+    // Build the flat pointer array required by PeelAllgather::run().
+    bufPtrs_.resize(worldSize);
+    for (int r = 0; r < worldSize; ++r) {
+      bufPtrs_[r] = (r == rank)
+                        ? static_cast<void*>(inPtrs[0])        // aligned send buf
+                        : static_cast<void*>(recvBufs_[r].data()); // zeroed recv buf
+    }
+
+    // Initialize shared contexts and allgather object once.
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedAllgather_) return;
+
+    transport::tcp::peel::PeelDiscoveryConfig dc;
+    dc.rank         = rank;
+    dc.world_size   = worldSize;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ag_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 30000;
+
+    transport::tcp::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    sharedCtxs_.resize(worldSize);
+    std::vector<transport::tcp::peel::PeelContext*> ctxPtrs(worldSize);
+
+    for (int r = 0; r < worldSize; ++r) {
+      transport::tcp::peel::PeelContextConfig cfg;
+      cfg.rank          = rank;
+      cfg.world_size    = worldSize;
+      cfg.sender_rank   = r;
+      cfg.peer_ips      = discovery.peerIps();
+      cfg.mcast_group   = this->options_.peelMcastGroup;
+      cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+      cfg.iface_name    = this->options_.peelIface;
+      cfg.ttl           = this->options_.peelTTL;
+      cfg.topology_file = this->options_.peelTopologyFile;
+      cfg.rto_ms        = this->options_.peelRtoMs;
+
+      sharedCtxs_[r] = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
+      GLOO_ENFORCE(
+          sharedCtxs_[r]->init(),
+          "PeelContext init failed for sender_rank=", r);
+      ctxPtrs[r] = sharedCtxs_[r].get();
+    }
+
+    auto mode = this->options_.peelParallel
+                    ? transport::tcp::peel::PeelAllgatherMode::Parallel
+                    : transport::tcp::peel::PeelAllgatherMode::Sequential;
+
+    sharedAllgather_ = std::make_shared<transport::tcp::peel::PeelAllgather>(
+        ctxPtrs, mode);
+  }
+
+  void run() override {
+    sharedAllgather_->run(bufPtrs_, dataBytes_);
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const int    rank      = this->context_->rank;
+    const int    worldSize = this->context_->size;
+    // inputs_ is populated by allocate(); inputs_[0].size() == elements.
+    const size_t elements  = this->inputs_.empty() ? 0 : this->inputs_[0].size();
+    // stride matches allocate(1, elements): worldSize * numInputs = worldSize * 1
+    const int    stride    = worldSize;
+
+    for (int r = 0; r < worldSize; ++r) {
+      // Use the aligned inputs_ buffer for our own rank; recvBufs_ for others.
+      const T* buf = (r == rank)
+                         ? this->inputs_[0].data()
+                         : reinterpret_cast<const T*>(bufPtrs_[r]);
+      for (size_t i = 0; i < elements; ++i) {
+        // allocate() pattern for sender rank r: buf[i] = i * stride + r
+        T expected = static_cast<T>(static_cast<int>(i) * stride + r);
+        if (buf[i] != expected) {
+          errors.push_back(
+              "peel_allgather rank=" + std::to_string(rank) +
+              " buf[sender=" + std::to_string(r) + "][" + std::to_string(i) + "]=" +
+              std::to_string(static_cast<int>(buf[i])) +
+              " expected=" + std::to_string(static_cast<int>(expected)));
+          break; // report first mismatch per buffer, then move on
+        }
+      }
+    }
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::tcp::peel::PeelAllgather>
+    PeelAllgatherBenchmark<T>::sharedAllgather_;
+
+template <typename T>
+std::vector<std::shared_ptr<transport::tcp::peel::PeelContext>>
+    PeelAllgatherBenchmark<T>::sharedCtxs_;
+
+template <typename T>
+std::mutex PeelAllgatherBenchmark<T>::initMutex_;
+
 
 } // namespace
 
@@ -1110,7 +1283,11 @@ std::mutex PeelBroadcastBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
     };                                                                         \
-  }                                                                            \
+  } else if (x.benchmark == "peel_allgather") {                                \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \
+    };
+  }                                                                       \
   if (!fn) {                                                                   \
     GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                   \
   }                                                                            \

@@ -68,6 +68,8 @@ static void usage(int status, const char* argv0) {
   X("      --peel-ttl=N               Multicast TTL (default: 3)");
   X("      --peel-sender-rank=N       Broadcast root rank (default: 0)");
   X("      --peel-topology-file=PATH  Topology file (required for tree mode)");
+  X("      --peel-parallel            Allgather: run N broadcasts concurrently (default: sequential)");
+  X("      --peel-rto=MS              Stop-and-wait retransmission timeout in ms (default: 500)");
   X("");
   X("Benchmark parameters:");
   X("      --no-verify        Do not verify results of first iteration");
@@ -193,7 +195,9 @@ struct options parseOptions(int argc, char** argv) {
       {"peel-ttl", required_argument, nullptr, 0x3004},
       {"peel-sender-rank", required_argument, nullptr, 0x3005},
       {"peel-topology-file", required_argument, nullptr, 0x3006},
+      {"peel-parallel",      no_argument,       nullptr, 0x3007},
       {"help", no_argument, nullptr, 0xffff},
+      {"peel-rto",           required_argument, nullptr, 0x3008},
       {nullptr, 0, nullptr, 0}};
 
   int opt;
@@ -384,6 +388,16 @@ struct options parseOptions(int argc, char** argv) {
       case 0x3006: // --peel-topology-file
       {
         result.peelTopologyFile = std::string(optarg, strlen(optarg));
+        break;
+      }
+      case 0x3007: // --peel-parallel
+      {
+        result.peelParallel = true;
+        break;
+      }
+      case 0x3008: // --peel-rto
+      {
+        result.peelRtoMs = atoi(optarg);
         break;
       }
       case 0xffff: // --help
