@@ -7,6 +7,7 @@
  */
 
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include "gloo/allgather.h"
