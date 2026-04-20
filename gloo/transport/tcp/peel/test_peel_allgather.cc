@@ -10,9 +10,8 @@
  *   4. Each rank fills its own send buffer with a recognizable pattern:
  *        buf[r][i] = r * dataCount + i
  *      All other buffers are zeroed (will be overwritten by broadcast).
- *   5. Runs N sequential broadcasts — for each r = 0..world_size-1:
- *        contexts[r]->broadcast(r, bufs[r].data(), dataBytes)
- *      After the loop, every rank holds every other rank's data.
+ *   5. Constructs a PeelAllgather and calls run() — sequential or parallel
+ *      depending on the --parallel flag.
  *   6. Measures total wall time and computes aggregate throughput.
  *   7. All ranks verify every buffer matches the expected pattern.
  *
@@ -22,7 +21,7 @@
  * Usage:
  *   ./test_peel_allgather <rank> <world_size> <redis_host>
  *                         [redis_port] [iface] [mcast_group] [base_port]
- *                         [topology_file]
+ *                         [topology_file] [--parallel]
  *
  * Arguments:
  *   rank           — this process's rank (0-based)
@@ -35,6 +34,7 @@
  *   base_port      — base UDP port; formula: base + sender*W*W + subtree*W
  *                    (default: 50000)
  *   topology_file  — path to adjacency topology file; omit for flat mode
+ *   --parallel     — run all N broadcasts concurrently (default: sequential)
  *
  * Port isolation guarantee:
  *   Each sender r occupies ports [base + r*W*W, base + r*W*W + W*max_subtrees).
@@ -42,21 +42,23 @@
  *   All N contexts are open simultaneously — they never share a port.
  *
  * Examples:
- *   Flat mode (no topology):
+ *   Sequential (default):
  *     ./test_peel_allgather 0 4 10.0.0.1 6379 eth0
  *
- *   Tree mode (with topology):
- *     ./test_peel_allgather 0 4 10.0.0.1 6379 eth0 239.255.0.1 50000 topo.txt
+ *   Parallel:
+ *     ./test_peel_allgather 0 4 10.0.0.1 6379 eth0 239.255.0.1 50000 topo.txt --parallel
  */
 
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <memory>
 #include <numeric>
 #include <string>
 #include <vector>
 
+#include "gloo/transport/tcp/peel/peel_allgather.h"
 #include "gloo/transport/tcp/peel/peel_context.h"
 #include "gloo/transport/tcp/peel/peel_discovery.h"
 
@@ -65,16 +67,17 @@ using Clock = std::chrono::steady_clock;
 static void printUsage(const char* prog) {
     std::cerr << "Usage: " << prog
               << " <rank> <world_size> <redis_host>"
-                 " [redis_port] [iface] [mcast_group] [base_port] [topology_file]\n"
+                 " [redis_port] [iface] [mcast_group] [base_port] [topology_file] [--parallel]\n"
               << "\nDefaults:\n"
               << "  redis_port:    6379\n"
               << "  iface:         (required)\n"
               << "  mcast_group:   239.255.0.1\n"
               << "  base_port:     50000\n"
               << "  topology_file: (none — flat single-transport mode)\n"
+              << "  --parallel:    off (sequential by default)\n"
               << "\nExamples:\n"
               << "  " << prog << " 0 4 10.0.0.1 6379 eth0\n"
-              << "  " << prog << " 0 4 10.0.0.1 6379 eth0 239.255.0.1 50000 topo.txt\n";
+              << "  " << prog << " 0 4 10.0.0.1 6379 eth0 239.255.0.1 50000 topo.txt --parallel\n";
 }
 
 int main(int argc, char** argv) {
@@ -93,7 +96,19 @@ int main(int argc, char** argv) {
     std::string iface        = (argc > 5) ? argv[5] : "";
     std::string mcastGroup   = (argc > 6) ? argv[6] : "239.255.0.1";
     uint16_t    basePort     = (argc > 7) ? static_cast<uint16_t>(std::atoi(argv[7])) : 50000;
-    std::string topologyFile = (argc > 8) ? argv[8] : "";
+    std::string topologyFile = "";
+    bool        parallel     = false;
+
+    // Scan remaining args for topology file and --parallel flag
+    for (int i = 8; i < argc; ++i) {
+        if (std::strcmp(argv[i], "--parallel") == 0) {
+            parallel = true;
+        } else {
+            topologyFile = argv[i];
+        }
+    }
+
+    auto modeStr = parallel ? "PARALLEL" : "SEQUENTIAL";
 
     std::cout << "\n[PEEL-AG] ====== STEP 1: Config ======\n"
               << "[PEEL-AG] Rank " << rank << "/" << worldSize
@@ -102,7 +117,8 @@ int main(int argc, char** argv) {
               << "  mcast=" << mcastGroup
               << "  base_port=" << basePort << "\n"
               << "[PEEL-AG] Topology: "
-              << (topologyFile.empty() ? "FLAT (no file)" : topologyFile) << "\n";
+              << (topologyFile.empty() ? "FLAT (no file)" : topologyFile) << "\n"
+              << "[PEEL-AG] Mode: " << modeStr << "\n";
 
     if (iface.empty()) {
         std::cerr << "[PEEL-AG] ERROR — iface argument is required for AF_PACKET\n";
@@ -111,7 +127,6 @@ int main(int argc, char** argv) {
 
     // =========================================================================
     // Step 2: PeelDiscovery — build rank→IP map via Redis
-    // No TCP context is needed; discovery talks to Redis directly.
     // =========================================================================
     std::cout << "\n[PEEL-AG] ====== STEP 2: PeelDiscovery ======\n";
 
@@ -141,25 +156,22 @@ int main(int argc, char** argv) {
 
     // =========================================================================
     // Step 3: Create N PeelContext objects — one per sender rank
-    //
-    // Each context is rooted at a different rank (sender_rank = r).
-    // The port formula base + sender_rank*W*W + subtree_id*W ensures every
-    // context uses a completely separate port range, so all N can be open
-    // and initialized simultaneously without any port conflicts.
     // =========================================================================
     std::cout << "\n[PEEL-AG] ====== STEP 3: Initializing " << worldSize
               << " PeelContext(s) ======\n";
 
-    std::vector<std::unique_ptr<gloo::transport::tcp::peel::PeelContext>> contexts;
-    contexts.reserve(worldSize);
+    std::vector<std::unique_ptr<gloo::transport::tcp::peel::PeelContext>> ctxOwners;
+    std::vector<gloo::transport::tcp::peel::PeelContext*>                 ctxPtrs;
+    ctxOwners.reserve(worldSize);
+    ctxPtrs.reserve(worldSize);
 
     for (int r = 0; r < worldSize; ++r) {
         gloo::transport::tcp::peel::PeelContextConfig cfg;
         cfg.rank          = rank;
         cfg.world_size    = worldSize;
-        cfg.sender_rank   = r;         // root of this broadcast tree
+        cfg.sender_rank   = r;
         cfg.peer_ips      = peerIps;
-        cfg.base_port     = basePort;  // formula in PeelTree handles isolation
+        cfg.base_port     = basePort;
         cfg.iface_name    = iface;
         cfg.mcast_group   = mcastGroup;
         cfg.topology_file = topologyFile;
@@ -178,31 +190,28 @@ int main(int argc, char** argv) {
 
         std::cout << "[PEEL-AG] Rank " << rank
                   << ": context[sender=" << r << "] ready ✓\n";
-        contexts.push_back(std::move(ctx));
+        ctxPtrs.push_back(ctx.get());
+        ctxOwners.push_back(std::move(ctx));
     }
 
     // =========================================================================
     // Step 4: Prepare data buffers
-    //
-    // bufs[r] is the data that rank r will broadcast to everyone.
-    // Pattern: bufs[r][i] = r * dataCount + i
-    //   → rank 0 broadcasts 0, 1, 2, ...
-    //   → rank 1 broadcasts 1000000, 1000001, ...  (with dataCount=1M)
-    //   → etc.
-    // Each rank fills only its own buffer; all others start zeroed and are
-    // overwritten by the corresponding broadcast.
     // =========================================================================
     std::cout << "\n[PEEL-AG] ====== STEP 4: Prepare data ======\n";
 
-    const size_t dataCount = 256 * 1024;             // 256 K uint32 elements = 1 MB
+    const size_t dataCount = 256 * 1024;             // 256 K uint32 = 1 MB
     const size_t dataBytes = dataCount * sizeof(uint32_t);
 
     std::vector<std::vector<uint32_t>> bufs(
         worldSize, std::vector<uint32_t>(dataCount, 0));
 
-    // Fill this rank's send buffer with its unique pattern.
     for (size_t i = 0; i < dataCount; ++i)
         bufs[rank][i] = static_cast<uint32_t>(rank * dataCount + i);
+
+    // Build void* view for PeelAllgather::run()
+    std::vector<void*> bufPtrs(worldSize);
+    for (int r = 0; r < worldSize; ++r)
+        bufPtrs[r] = bufs[r].data();
 
     std::cout << "[PEEL-AG] Rank " << rank << ": buffer[" << rank
               << "] filled with pattern (rank*" << dataCount << " + i).  "
@@ -212,56 +221,33 @@ int main(int argc, char** argv) {
               << (dataBytes * worldSize) / (1024 * 1024) << " MB\n";
 
     // =========================================================================
-    // Step 5: Allgather — N sequential broadcasts
-    //
-    // For each sender r:
-    //   contexts[r]->broadcast(r, bufs[r].data(), dataBytes)
-    //
-    // After all N iterations, bufs[r] on every rank contains exactly what
-    // rank r filled in Step 4.
-    //
-    // Why sequential here: this is a correctness test; the stop-and-wait ACK
-    // protocol inside each transport already handles ordering within one
-    // broadcast.  Parallel broadcasts across contexts would also work (their
-    // port ranges don't overlap), but sequential is easier to debug.
+    // Step 5: Allgather via PeelAllgather
     // =========================================================================
     std::cout << "\n[PEEL-AG] ====== STEP 5: Allgather (" << worldSize
-              << " broadcasts) ======\n";
+              << " broadcasts, " << modeStr << ") ======\n";
 
-    auto totalStart = Clock::now();
+    auto mode = parallel
+                    ? gloo::transport::tcp::peel::PeelAllgatherMode::Parallel
+                    : gloo::transport::tcp::peel::PeelAllgatherMode::Sequential;
 
-    for (int r = 0; r < worldSize; ++r) {
-        std::cout << "[PEEL-AG] Rank " << rank
-                  << ": broadcast from sender " << r << " ...\n";
+    gloo::transport::tcp::peel::PeelAllgather allgather(ctxPtrs, mode);
 
-        auto t0 = Clock::now();
-        bool ok = contexts[r]->broadcast(r, bufs[r].data(), dataBytes);
-        auto t1 = Clock::now();
+    auto t0 = Clock::now();
+    bool ok = allgather.run(bufPtrs, dataBytes);
+    auto t1 = Clock::now();
 
-        if (!ok) {
-            std::cerr << "[PEEL-AG] Rank " << rank
-                      << ": ERROR — broadcast failed for sender_rank=" << r << "\n";
-            return 1;
-        }
-
-        auto us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-        std::cout << "[PEEL-AG] Rank " << rank
-                  << ": broadcast[sender=" << r << "] done in "
-                  << us / 1000.0 << " ms  ("
-                  << static_cast<double>(dataBytes) / (us / 1e6) / (1024.0 * 1024.0)
-                  << " MB/s)\n";
+    if (!ok) {
+        std::cerr << "[PEEL-AG] Rank " << rank << ": ERROR — allgather failed\n";
+        return 1;
     }
-
-    auto totalEnd = Clock::now();
 
     // =========================================================================
     // Step 6: Timing summary
     // =========================================================================
-    auto totalUs       = std::chrono::duration_cast<std::chrono::microseconds>(
-                             totalEnd - totalStart).count();
-    double totalMs     = totalUs / 1000.0;
-    double totalBytes  = static_cast<double>(dataBytes) * worldSize;
-    double throughput  = totalBytes / (totalUs / 1e6) / (1024.0 * 1024.0);
+    auto   totalUs    = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+    double totalMs    = totalUs / 1000.0;
+    double totalBytes = static_cast<double>(dataBytes) * worldSize;
+    double throughput = totalBytes / (totalUs / 1e6) / (1024.0 * 1024.0);
 
     std::cout << "\n[PEEL-AG] ====== STEP 6: Timing ======\n"
               << "[PEEL-AG] Rank " << rank << ": allgather completed in "
@@ -270,9 +256,6 @@ int main(int argc, char** argv) {
 
     // =========================================================================
     // Step 7: Verify
-    //
-    // Every rank checks all N buffers.
-    // bufs[r][i] must equal r * dataCount + i.
     // =========================================================================
     std::cout << "\n[PEEL-AG] ====== STEP 7: Verify ======\n";
 
