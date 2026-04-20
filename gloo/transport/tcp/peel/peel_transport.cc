@@ -486,7 +486,12 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
 
         while (Clock::now() < linger_end) {
             uint8_t lbuf[65536];
-            ssize_t ln = ::recv(ch->fd, lbuf, sizeof(lbuf), 0);
+
+            // Peek first so we do not accidentally consume the first packet of
+            // the next transfer while lingering for a possible FIN retransmit.
+            // If the peeked packet belongs to the next transfer, leave it queued
+            // on the socket and let the next recv() call process it normally.
+            ssize_t ln = ::recv(ch->fd, lbuf, sizeof(lbuf), MSG_PEEK);
             if (ln < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
                     continue;  // no retransmit yet; keep waiting
@@ -502,23 +507,54 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
                 ch->mcast.sin_addr.s_addr,
                 ch->port,
                 lsrc_ip, lsrc_port, lplen);
-            if (!lpayload || lplen < PEEL_HEADER_SIZE) continue;
 
-            PeelHeader lhdr{};
-            std::memcpy(&lhdr, lpayload, sizeof(lhdr));
-            if (!peel_verify_header_checksum(lhdr)) continue;
-            if (lhdr.rank != static_cast<uint8_t>(from_rank)) continue;
-            if (!(ntohs(lhdr.flags) & FLG_DATA)) continue;
+            bool consume = true;
+            bool reack_fin = false;
 
-            uint32_t lpkt_seq = ntohl(lhdr.seq);
+            if (lpayload && lplen >= PEEL_HEADER_SIZE) {
+                PeelHeader lhdr{};
+                std::memcpy(&lhdr, lpayload, sizeof(lhdr));
+                if (peel_verify_header_checksum(lhdr) &&
+                    lhdr.rank == static_cast<uint8_t>(from_rank) &&
+                    (ntohs(lhdr.flags) & FLG_DATA)) {
+                    const uint32_t lpkt_seq = ntohl(lhdr.seq);
 
-            if (lpkt_seq == fin_seq) {
-                // Sender is retransmitting the FIN — re-ACK it so it can proceed.
-                sendAck(lsrc_ip, ntohs(lhdr.src_port), lmac,
-                        lpkt_seq, ntohl(lhdr.tsval), lhdr.retrans_id);
-            } else if (lpkt_seq > fin_seq) {
-                // Sender already moved on to the next iteration's SYN — exit early.
-                break;
+                    if (lpkt_seq == fin_seq) {
+                        // Sender is retransmitting the FIN — consume and re-ACK it.
+                        reack_fin = true;
+                    } else if (lpkt_seq > fin_seq) {
+                        // First packet of the next transfer. Leave it queued so
+                        // the next recv() call can consume it.
+                        break;
+                    }
+                }
+            }
+
+            if (consume) {
+                ln = ::recv(ch->fd, lbuf, sizeof(lbuf), 0);
+                if (ln < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                        continue;
+                    break;
+                }
+            }
+
+            if (reack_fin) {
+                PeelHeader lhdr{};
+                // Re-parse from the consumed frame so ACK fields are correct.
+                uint32_t csrc_ip; uint16_t csrc_port; size_t cplen;
+                const uint8_t* cpayload = parse_udp_frame(
+                    lbuf, ln,
+                    ch->mcast.sin_addr.s_addr,
+                    ch->port,
+                    csrc_ip, csrc_port, cplen);
+                if (cpayload && cplen >= PEEL_HEADER_SIZE) {
+                    std::memcpy(&lhdr, cpayload, sizeof(lhdr));
+                    uint8_t cmac[6]{};
+                    if (ln >= 12) memcpy(cmac, lbuf + 6, 6);
+                    sendAck(csrc_ip, ntohs(lhdr.src_port), cmac,
+                            ntohl(lhdr.seq), ntohl(lhdr.tsval), lhdr.retrans_id);
+                }
             }
         }
         // Restore 100 ms poll timeout for next recv() call on this socket.
