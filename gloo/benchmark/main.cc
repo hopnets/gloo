@@ -1257,9 +1257,6 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
   }
 };
 
-  }
-};
-
 template <typename T>
 std::shared_ptr<transport::tcp::peel::PeelContext>
     PeelBroadcastRingBenchmark<T>::sharedCtx_;
@@ -1403,10 +1400,9 @@ std::mutex PeelAllgatherBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \
     };                                                                         \
-
   }                                                                            \
   if (!fn) {                                                                   \
-  GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                   \
+    GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                 \
   }                                                                            \
   Runner r(x);                                                                 \
   r.run(fn);
