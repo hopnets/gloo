@@ -16,7 +16,7 @@ namespace peel {
 
 constexpr uint16_t PEEL_DEFAULT_BASE_PORT = 50000;
 constexpr uint16_t PEEL_HEADER_SIZE = 22;
-constexpr size_t PEEL_MAX_PAYLOAD = 9000;  // Safe for most MTUs
+constexpr size_t PEEL_MAX_PAYLOAD = 8900;  // Safe for most MTUs
 constexpr int PEEL_DEFAULT_TTL = 64;
 constexpr int PEEL_DEFAULT_RTO_MS = 500;
 constexpr int PEEL_DEFAULT_RETRIES = 20;
