@@ -1138,6 +1138,14 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
     // stride matches allocate(1, elements): worldSize * numInputs = worldSize * 1
     const int    stride    = worldSize;
 
+    // float16 has no operator float() or operator int() — use operator<< which
+    // IS defined for all T (float16's is in types.h, float/char use stdlib).
+    auto toStr = [](T v) -> std::string {
+      std::ostringstream oss;
+      oss << v;
+      return oss.str();
+    };
+
     for (int r = 0; r < worldSize; ++r) {
       // Use the aligned inputs_ buffer for our own rank; recvBufs_ for others.
       const T* buf = (r == rank)
@@ -1150,8 +1158,8 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
           errors.push_back(
               "peel_allgather rank=" + std::to_string(rank) +
               " buf[sender=" + std::to_string(r) + "][" + std::to_string(i) + "]=" +
-              std::to_string(static_cast<int>(buf[i])) +
-              " expected=" + std::to_string(static_cast<int>(expected)));
+              toStr(buf[i]) +
+              " expected=" + toStr(expected));
           break; // report first mismatch per buffer, then move on
         }
       }
@@ -1169,7 +1177,6 @@ std::vector<std::shared_ptr<transport::tcp::peel::PeelContext>>
 
 template <typename T>
 std::mutex PeelAllgatherBenchmark<T>::initMutex_;
-
 
 } // namespace
 
@@ -1287,7 +1294,7 @@ std::mutex PeelAllgatherBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \
     };
-  }                                                                       \
+  }                                                                            \
   if (!fn) {                                                                   \
     GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                   \
   }                                                                            \

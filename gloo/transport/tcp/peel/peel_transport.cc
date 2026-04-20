@@ -263,21 +263,28 @@ bool PeelTransport::send(const void* data, size_t size) {
         if (remaining == size)  flags |= FLG_SYN;
         if (remaining <= chunk) flags |= FLG_FIN;
 
+        const int mesh_size = config_.participant_ranks.empty()
+            ? config_.world_size
+            : static_cast<int>(config_.participant_ranks.size());
+
+        // Persistent ACK-tracking set: shared across all retransmit attempts for
+        // this sequence number.  A receiver whose ACK was delayed past the first
+        // rto_ms window has already inserted its frame into the socket buffer; if
+        // we retransmit and open a second window the delayed ACK is counted along
+        // with fresh re-ACKs from the dup retransmit.  Without this, every attempt
+        // requires a full set of N-1 new ACKs from scratch.
+        std::unordered_set<uint64_t> got;
+        got.reserve(static_cast<size_t>(std::max(mesh_size, 1)) * 2);
+
         // Stop-and-wait: retry up to PEEL_DEFAULT_RETRIES times per packet
         bool acked = false;
         for (int attempt = 0; attempt < PEEL_DEFAULT_RETRIES && !acked; ++attempt) {
             if (!sendPacket(seq, flags, ptr, chunk)) return false;
 
             // No receivers in this mesh: nothing to wait for.
-            // Use participant count if set, otherwise fall back to world_size.
-            // waitForAcks also handles expected==0 correctly, but short-circuiting
-            // here avoids an unnecessary socket recv() call.
-            const int mesh_size = config_.participant_ranks.empty()
-                ? config_.world_size
-                : static_cast<int>(config_.participant_ranks.size());
             if (mesh_size <= 1) { acked = true; break; }
 
-            acked = waitForAcks(seq, config_.rto_ms);
+            acked = waitForAcks(seq, config_.rto_ms, got);
             if (!acked)
                 std::cerr << "peel_transport[" << config_.rank << "]: timeout seq="
                           << seq << " attempt=" << attempt + 1 << ", retransmitting\n";
@@ -450,6 +457,77 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
         ++expected_seq;
     }
 
+    // ==========================================================================
+    // TIME_WAIT linger: re-ACK retransmitted FINs after the data phase ends.
+    //
+    // Problem: after the receiver copies the last chunk and sends the FIN-ACK it
+    // exits this loop.  If that ACK is lost in transit, the sender retransmits
+    // the FIN — but the receiver is no longer polling this socket, so no re-ACK
+    // is ever sent.  The sender exhausts all PEEL_DEFAULT_RETRIES and fails.
+    //
+    // Fix: stay in a lightweight re-ACK loop for up to rto_ms milliseconds.  If
+    // the sender's retransmit arrives in that window we respond immediately and
+    // the sender succeeds on its next waitForAcks() call.  If no retransmit
+    // arrives the linger exits cleanly with zero extra overhead per chunk.
+    //
+    // Note: this adds at most rto_ms latency per broadcast at the receiver side.
+    // With rto_ms=500 ms and a reliable network the retransmit (if any) arrives
+    // in < 1 ms, so in practice the linger exits on the very first poll.
+    // ==========================================================================
+    if (done) {
+        uint32_t fin_seq = expected_seq - 1;  // seq of the FIN we just ACKed
+        int linger_ms = config_.rto_ms > 0 ? config_.rto_ms : PEEL_DEFAULT_RTO_MS;
+        auto linger_end = Clock::now() + std::chrono::milliseconds(linger_ms);
+
+        timeval linger_tv{};
+        linger_tv.tv_sec  = 0;
+        linger_tv.tv_usec = 50000;  // 50 ms poll so we can check the deadline
+        setsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &linger_tv, sizeof(linger_tv));
+
+        while (Clock::now() < linger_end) {
+            uint8_t lbuf[65536];
+            ssize_t ln = ::recv(ch->fd, lbuf, sizeof(lbuf), 0);
+            if (ln < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                    continue;  // no retransmit yet; keep waiting
+                break;         // real socket error
+            }
+
+            uint8_t lmac[6]{};
+            if (ln >= 12) memcpy(lmac, lbuf + 6, 6);
+
+            uint32_t lsrc_ip; uint16_t lsrc_port; size_t lplen;
+            const uint8_t* lpayload = parse_udp_frame(
+                lbuf, ln,
+                ch->mcast.sin_addr.s_addr,
+                ch->port,
+                lsrc_ip, lsrc_port, lplen);
+            if (!lpayload || lplen < PEEL_HEADER_SIZE) continue;
+
+            PeelHeader lhdr{};
+            std::memcpy(&lhdr, lpayload, sizeof(lhdr));
+            if (!peel_verify_header_checksum(lhdr)) continue;
+            if (lhdr.rank != static_cast<uint8_t>(from_rank)) continue;
+            if (!(ntohs(lhdr.flags) & FLG_DATA)) continue;
+
+            uint32_t lpkt_seq = ntohl(lhdr.seq);
+
+            if (lpkt_seq == fin_seq) {
+                // Sender is retransmitting the FIN — re-ACK it so it can proceed.
+                sendAck(lsrc_ip, ntohs(lhdr.src_port), lmac,
+                        lpkt_seq, ntohl(lhdr.tsval), lhdr.retrans_id);
+            } else if (lpkt_seq > fin_seq) {
+                // Sender already moved on to the next iteration's SYN — exit early.
+                break;
+            }
+        }
+        // Restore 100 ms poll timeout for next recv() call on this socket.
+        timeval restore_tv{};
+        restore_tv.tv_sec  = 0;
+        restore_tv.tv_usec = 100000;
+        setsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &restore_tv, sizeof(restore_tv));
+    }
+
     return done ? static_cast<ssize_t>(received) : -1;
 }
 
@@ -526,7 +604,8 @@ void PeelTransport::sendAck(uint32_t dst_ip_n, uint16_t dst_port_h,
            reinterpret_cast<const sockaddr*>(&sll), sizeof(sll));
 }
 
-bool PeelTransport::waitForAcks(uint32_t seq, int timeout_ms) {
+bool PeelTransport::waitForAcks(uint32_t seq, int timeout_ms,
+                                  std::unordered_set<uint64_t>& got) {
     if (!isReady()) return false;
 
     auto* ch = mesh_result_->send_channel.get();
@@ -536,21 +615,30 @@ bool PeelTransport::waitForAcks(uint32_t seq, int timeout_ms) {
         ? config_.world_size - 1
         : static_cast<int>(config_.participant_ranks.size()) - 1;
     if (expected <= 0) return true;
+    // Short-circuit: caller accumulates got across retransmits; we may already
+    // have enough ACKs from the previous attempt.
+    if ((int)got.size() >= expected) return true;
 
-    // Pack (src_ip, src_port) into a 64-bit key to track unique receivers
-    std::unordered_set<uint64_t> got;
-    got.reserve((size_t)expected * 2);
+    // Use a short poll interval so the deadline-check loop is reactive.
+    // The old code set SO_RCVTIMEO = rto_ms and broke on EAGAIN — meaning the
+    // entire rto_ms budget was spent on a single blocking recv() call, and any
+    // ACK arriving epsilon after the timeout was silently discarded.  With 50 ms
+    // poll intervals we check the deadline 10× per rto_ms and continue polling
+    // instead of breaking, so late ACKs are still collected within the window.
+    timeval poll_tv{};
+    poll_tv.tv_sec  = 0;
+    poll_tv.tv_usec = 50000;  // 50 ms poll interval
+    setsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &poll_tv, sizeof(poll_tv));
 
     auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
 
-    while (Clock::now() < deadline) {
+    while ((int)got.size() < expected && Clock::now() < deadline) {
         uint8_t buf[2048];
         ssize_t n = ::recv(ch->fd, buf, sizeof(buf), 0);
         if (n < 0) {
-            // SO_RCVTIMEO expired or interrupted
-            if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-            if (errno == EINTR) continue;
-            break;
+            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+                continue;  // keep polling until deadline
+            break;         // real socket error
         }
 
         uint32_t src_ip; uint16_t src_port; size_t plen;
@@ -568,13 +656,19 @@ bool PeelTransport::waitForAcks(uint32_t seq, int timeout_ms) {
         if ((ntohs(hdr.flags) & FLG_ACK) == 0) continue;
         if (ntohl(hdr.seq) != seq) continue;
 
-        // Unique key per receiver: (src_ip, src_port)
+        // Unique key per receiver: pack (src_ip, src_port) into 64 bits.
+        // src_ip occupies bits 47-16, src_port occupies bits 15-0 — no overlap.
         uint64_t key = ((uint64_t)(uint32_t)src_ip << 16) | src_port;
         got.insert(key);
-        if ((int)got.size() >= expected) return true;
     }
 
-    return false;
+    // Restore the original SO_RCVTIMEO (used by performHandshake on the same fd).
+    timeval orig_tv{};
+    orig_tv.tv_sec  = config_.rto_ms / 1000;
+    orig_tv.tv_usec = (config_.rto_ms % 1000) * 1000;
+    setsockopt(ch->fd, SOL_SOCKET, SO_RCVTIMEO, &orig_tv, sizeof(orig_tv));
+
+    return (int)got.size() >= expected;
 }
 
 } // namespace peel

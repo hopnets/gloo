@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace gloo {
@@ -122,8 +123,12 @@ private:
     bool recvPacket(int from_rank, PeelHeader& hdr,
                     std::vector<uint8_t>& payload, int timeout_ms);
 
-    // Wait for ACKs from all receivers (stop-and-wait)
-    bool waitForAcks(uint32_t seq, int timeout_ms);
+    // Wait for ACKs from all receivers (stop-and-wait).
+    // got is passed by reference and accumulates across retransmit attempts so that
+    // a receiver whose ACK arrived late (but before the next retransmit window) still
+    // counts toward the total — callers must NOT reset got between retransmit loops.
+    bool waitForAcks(uint32_t seq, int timeout_ms,
+                     std::unordered_set<uint64_t>& got);
 
     // Send a unicast ACK frame back to the sender
     void sendAck(uint32_t dst_ip_n, uint16_t dst_port_h, const uint8_t dst_mac[6],
