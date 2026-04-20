@@ -364,7 +364,7 @@ ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int time
     uint32_t expected_seq = 0;      // next seq we expect from sender
 
     auto deadline = Clock::now() + std::chrono::milliseconds(
-        timeout_ms > 0 ? timeout_ms : 300000);
+        timeout_ms > 0 ? timeout_ms : config_.timeout_ms);
 
     timeval tv{};
     tv.tv_sec  = 0;
