@@ -1294,6 +1294,128 @@ std::vector<std::shared_ptr<transport::tcp::peel::PeelContext>>
 template <typename T>
 std::mutex PeelAllgatherBenchmark<T>::initMutex_;
 
+// =============================================================================
+// PeelAllgatherRingBenchmark
+//
+// Ring allgather over the single-receiver Peel hop transports created by
+// PeelContext::initRing().  This follows the same round-by-round dataflow as
+// Gloo's AllgatherRing, but each logical edge uses a dedicated 2-rank Peel
+// transport: sender i -> receiver (i + 1) % worldSize.
+// =============================================================================
+template <typename T>
+class PeelAllgatherRingBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+  std::vector<std::vector<T>> recvBufs_;
+  std::vector<void*> bufPtrs_;
+  size_t dataBytes_ = 0;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_allgather_ring requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_allgather_ring does not support --threads > 1 ");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_allgather_ring requires --iteration-count N ");
+
+    const int rank = this->context_->rank;
+    const int worldSize = this->context_->size;
+    dataBytes_ = elements * sizeof(T);
+
+    auto inPtrs = this->allocate(1, elements);
+
+    recvBufs_.assign(worldSize, std::vector<T>(elements, T(0)));
+    bufPtrs_.resize(worldSize);
+    for (int r = 0; r < worldSize; ++r) {
+      bufPtrs_[r] = (r == rank)
+                        ? static_cast<void*>(inPtrs[0])
+                        : static_cast<void*>(recvBufs_[r].data());
+    }
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) {
+      return;
+    }
+
+    transport::tcp::peel::PeelDiscoveryConfig dc;
+    dc.rank         = rank;
+    dc.world_size   = worldSize;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ag_ring_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 30000;
+
+    transport::tcp::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::tcp::peel::PeelContextConfig cfg;
+    cfg.rank          = rank;
+    cfg.world_size    = worldSize;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = 0;
+    cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
+
+    sharedCtx_ = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+  }
+
+  void run() override {
+    GLOO_ENFORCE(
+        sharedCtx_->allgatherRing(bufPtrs_, dataBytes_),
+        "Peel ring allgather failed");
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const int rank = this->context_->rank;
+    const int worldSize = this->context_->size;
+    const size_t elements = this->inputs_.empty() ? 0 : this->inputs_[0].size();
+    const int stride = worldSize;
+
+    auto toStr = [](T v) -> std::string {
+      std::ostringstream oss;
+      oss << v;
+      return oss.str();
+    };
+
+    for (int r = 0; r < worldSize; ++r) {
+      const T* buf = (r == rank)
+                         ? this->inputs_[0].data()
+                         : reinterpret_cast<const T*>(bufPtrs_[r]);
+      for (size_t i = 0; i < elements; ++i) {
+        T expected = static_cast<T>(static_cast<int>(i) * stride + r);
+        if (buf[i] != expected) {
+          errors.push_back(
+              "peel_allgather_ring rank=" + std::to_string(rank) +
+              " buf[sender=" + std::to_string(r) + "][" +
+              std::to_string(i) + "]=" + toStr(buf[i]) +
+              " expected=" + toStr(expected));
+          break;
+        }
+      }
+    }
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::tcp::peel::PeelContext>
+    PeelAllgatherRingBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelAllgatherRingBenchmark<T>::initMutex_;
+
 
 } // namespace
 
@@ -1418,6 +1540,10 @@ std::mutex PeelAllgatherBenchmark<T>::initMutex_;
   } else if (x.benchmark == "peel_allgather") {                                \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \
+    };                                                                         \
+  } else if (x.benchmark == "peel_allgather_ring") {                           \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllgatherRingBenchmark<T>>(context, x);     \
     };                                                                         \
   }                                                                            \
   if (!fn) {                                                                   \
