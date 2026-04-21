@@ -21,6 +21,7 @@
 #include "gloo/allreduce_ring_chunked.h"
 #include "gloo/alltoall.h"
 #include "gloo/alltoallv.h"
+#include "gloo/barrier.h"
 #include "gloo/barrier_all_to_all.h"
 #include "gloo/barrier_all_to_one.h"
 #include "gloo/broadcast.h"
@@ -551,12 +552,21 @@ class BroadcastOneToAllBenchmark : public Benchmark<T> {
 
 template <typename T>
 class BroadcastRingBenchmark : public BroadcastBenchmark<T> {
-  using BroadcastBenchmark<T>::BroadcastBenchmark;
-
  public:
+  BroadcastRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : BroadcastBenchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE1);
+  }
+
   void run() override {
     broadcast_ring(this->opts_);
+    barrier(barrierOpts_);
   }
+
+ protected:
+  BarrierOptions barrierOpts_;
 };
 
 template <typename T>
@@ -1022,12 +1032,17 @@ std::mutex PeelBroadcastBenchmark<T>::initMutex_;
 
 template <typename T>
 class PeelBroadcastRingBenchmark : public Benchmark<T> {
-  using Benchmark<T>::Benchmark;
-
   static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
   static std::mutex initMutex_;
 
  public:
+  PeelBroadcastRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : Benchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE2);
+  }
+
   void initialize(size_t elements) override {
     GLOO_ENFORCE(
         !this->options_.peelIface.empty(),
@@ -1084,6 +1099,7 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
             this->inputs_[0].data(),
             this->inputs_[0].size() * sizeof(T)),
         "Peel ring broadcast failed");
+    barrier(barrierOpts_);
   }
 
   void verify(std::vector<std::string>& errors) override {
@@ -1095,6 +1111,9 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
         this->context_->rank,
         errors);
   }
+
+ protected:
+  BarrierOptions barrierOpts_;
 };
 
 // =============================================================================
