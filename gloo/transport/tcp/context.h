@@ -72,6 +72,14 @@ class Context : public ::gloo::transport::Context,
     if (!isPeelReady()) return false;
     return peelContext_->broadcastRing(root, data, size);
   }
+
+  // Convenience: perform ring allgather using Peel hop transports
+  // - bufs[src]: storage for the segment contributed by rank src
+  // - size: number of bytes per segment
+  bool peelAllgatherRing(const std::vector<void*>& bufs, size_t size) {
+    if (!isPeelReady()) return false;
+    return peelContext_->allgatherRing(bufs, size);
+  }
   
   // Cleanup Peel resources
   void disablePeel() {

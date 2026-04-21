@@ -5,6 +5,7 @@
 #include "peel_broadcast.h"
 #include "peel_transport.h"
 #include "peel_broadcast_ring.h"
+#include "peel_allgather_ring.h"
 
 #include <memory>
 #include <string>
@@ -78,6 +79,7 @@ public:
     bool broadcast(int root, void* data, size_t size);
 	
 	bool broadcastRing(int root, void* data, size_t size);
+    bool allgatherRing(const std::vector<void*>& bufs, size_t size);
     bool initRing();
 
     // Cleanup all transports.
@@ -97,6 +99,7 @@ private:
     std::unique_ptr<PeelBroadcast>              broadcast_;
     std::vector<std::unique_ptr<PeelTransport>> ring_transports_;
     std::unique_ptr<PeelBroadcastRing>          broadcast_ring_;
+    std::unique_ptr<PeelAllgatherRing>          allgather_ring_;
 };
 
 } // namespace peel

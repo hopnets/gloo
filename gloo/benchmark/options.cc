@@ -115,6 +115,8 @@ static void usage(int status, const char* argv0) {
   X("  isendirecv_stress");
   X("  peel_broadcast");
   X("  peel_broadcast_ring");
+  X("  peel_allgather");
+  X("  peel_allgather_ring");
   X("  broadcast_ring");
   X("");
 

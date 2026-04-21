@@ -153,12 +153,14 @@ bool PeelContext::initSingleTransport() {
 bool PeelContext::initRing() {
     ring_transports_.clear();
     broadcast_ring_.reset();
+    allgather_ring_.reset();
 
     std::vector<PeelRingHop> hops;
     hops.reserve(config_.world_size);
 
     if (config_.world_size <= 1) {
-        broadcast_ring_ = std::make_unique<PeelBroadcastRing>(std::move(hops));
+        broadcast_ring_ = std::make_unique<PeelBroadcastRing>(hops);
+        allgather_ring_ = std::make_unique<PeelAllgatherRing>(config_.rank, std::move(hops));
         return true;
     }
 
@@ -194,7 +196,8 @@ bool PeelContext::initRing() {
         hops.push_back(hop);
     }
 
-    broadcast_ring_ = std::make_unique<PeelBroadcastRing>(std::move(hops));
+    broadcast_ring_ = std::make_unique<PeelBroadcastRing>(hops);
+    allgather_ring_ = std::make_unique<PeelAllgatherRing>(config_.rank, std::move(hops));
 
     std::cout << "peel_context[" << config_.rank
               << "]: initialized ring transports ("
@@ -206,6 +209,11 @@ bool PeelContext::broadcastRing(int root, void* data, size_t size) {
     if (config_.world_size <= 1) return true;
     if (!broadcast_ring_) return false;
     return broadcast_ring_->run(root, data, size);
+}
+bool PeelContext::allgatherRing(const std::vector<void*>& bufs, size_t size) {
+    if (config_.world_size <= 1 || size == 0) return true;
+    if (!allgather_ring_) return false;
+    return allgather_ring_->run(bufs, size);
 }
 // ---------------------------------------------------------------------------
 // isReady / broadcast / cleanup
@@ -242,6 +250,7 @@ void PeelContext::cleanup() {
     transports_.clear();
 	
 	broadcast_ring_.reset();
+    allgather_ring_.reset();
     for (auto& t : ring_transports_)
         t->cleanup();
     ring_transports_.clear();
