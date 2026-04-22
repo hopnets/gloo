@@ -982,7 +982,7 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
     dc.redis_port   = this->options_.redisPort;
     dc.redis_prefix = this->options_.prefix + "/peel_ip";
     dc.iface_name   = this->options_.peelIface;
-    dc.timeout_ms   = 30000;
+    dc.timeout_ms   = 300000;
 
     transport::tcp::peel::PeelDiscovery discovery(dc);
     GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
@@ -1071,7 +1071,7 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
     dc.redis_port   = this->options_.redisPort;
     dc.redis_prefix = this->options_.prefix + "/peel_ring_ip";
     dc.iface_name   = this->options_.peelIface;
-    dc.timeout_ms   = 30000;
+    dc.timeout_ms   = 300000;
 
     transport::tcp::peel::PeelDiscovery discovery(dc);
     GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
@@ -1199,7 +1199,7 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
     dc.redis_port   = this->options_.redisPort;
     dc.redis_prefix = this->options_.prefix + "/peel_ag_ip";
     dc.iface_name   = this->options_.peelIface;
-    dc.timeout_ms   = 30000;
+    dc.timeout_ms   = 300000;
 
     transport::tcp::peel::PeelDiscovery discovery(dc);
     GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
@@ -1351,7 +1351,7 @@ class PeelAllgatherRingBenchmark : public Benchmark<T> {
     dc.redis_port   = this->options_.redisPort;
     dc.redis_prefix = this->options_.prefix + "/peel_ag_ring_ip";
     dc.iface_name   = this->options_.peelIface;
-    dc.timeout_ms   = 30000;
+    dc.timeout_ms   = 300000;
 
     transport::tcp::peel::PeelDiscovery discovery(dc);
     GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");

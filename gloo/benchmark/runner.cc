@@ -8,6 +8,7 @@
 
 #include "runner.h"
 
+#include <chrono>
 #include <cstdio>
 #include <iomanip>
 #include <iostream>
@@ -52,6 +53,9 @@ constexpr int kMaxIterations = 1000000000;
 // Maximum number of errors that can occur before the benchmark
 // considers it to be too large and truncates them
 constexpr int kMaxNumErrors = 100;
+
+// Benchmark-wide timeout for rendezvous, barriers, and other context-based operations
+constexpr auto kBenchmarkTimeout = std::chrono::milliseconds(300000);
 
 // Constants for formatting output
 constexpr int kColWidthS = 11;
@@ -193,6 +197,7 @@ void Runner::rendezvousRedis() {
       std::make_shared<rendezvous::PrefixStore>(options_.prefix, redisStore);
   auto backingContext = std::make_shared<rendezvous::Context>(
       options_.contextRank, options_.contextSize);
+  backingContext->setTimeout(kBenchmarkTimeout);
   backingContext->connectFullMesh(prefixStore, transportDevices_.front());
   contextFactory_ =
       std::make_shared<rendezvous::ContextFactory>(backingContext);
@@ -211,6 +216,7 @@ void Runner::rendezvousMPI() {
   MPI_Comm_rank(MPI_COMM_WORLD, &options_.contextRank);
   MPI_Comm_size(MPI_COMM_WORLD, &options_.contextSize);
   auto backingContext = std::make_shared<::gloo::mpi::Context>(MPI_COMM_WORLD);
+  backingContext->setTimeout(kBenchmarkTimeout);
   backingContext->connectFullMesh(transportDevices_.front());
   contextFactory_ =
       std::make_shared<rendezvous::ContextFactory>(backingContext);
@@ -228,6 +234,7 @@ void Runner::rendezvousFileSystem() {
       std::make_shared<rendezvous::PrefixStore>(options_.prefix, fileStore);
   auto backingContext = std::make_shared<rendezvous::Context>(
       options_.contextRank, options_.contextSize);
+  backingContext->setTimeout(kBenchmarkTimeout);
   backingContext->connectFullMesh(prefixStore, transportDevices_.front());
   // After connectFullMesh is called, the rendezvous files will have been
   // generated so we need to fetch them from the FileStore
