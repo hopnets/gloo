@@ -55,6 +55,7 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_broadcast_stop_and_wait.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_allgather.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_allgather_ring.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_allreduce_ring.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_context.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_discovery.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_tree.h"

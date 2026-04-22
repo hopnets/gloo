@@ -40,6 +40,7 @@
 #include "gloo/benchmark/runner.h"
 
 #include "gloo/transport/tcp/peel/peel_allgather.h"
+#include "gloo/transport/tcp/peel/peel_allreduce_ring.h"
 #include "gloo/transport/tcp/peel/peel_context.h"
 #include "gloo/transport/tcp/peel/peel_discovery.h"
 
@@ -1512,6 +1513,98 @@ std::shared_ptr<transport::tcp::peel::PeelContext>
 template <typename T>
 std::mutex PeelAllgatherRingBenchmark<T>::initMutex_;
 
+template <typename T>
+class PeelAllreduceRingBenchmark : public Benchmark<T> {
+  static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  PeelAllreduceRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : Benchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE4);
+  }
+
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_allreduce_ring requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_allreduce_ring does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent collectives)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_allreduce_ring requires --iteration-count N ");
+
+    auto ptrs = this->allocate(this->options_.inputs, elements);
+
+    {
+      std::lock_guard<std::mutex> lock(initMutex_);
+      if (!sharedCtx_) {
+        const int rank = this->context_->rank;
+        const int worldSize = this->context_->size;
+
+        transport::tcp::peel::PeelDiscoveryConfig dc;
+        dc.rank         = rank;
+        dc.world_size   = worldSize;
+        dc.redis_host   = this->options_.redisHost;
+        dc.redis_port   = this->options_.redisPort;
+        dc.redis_prefix = this->options_.prefix + "/peel_ar_ring_ip";
+        dc.iface_name   = this->options_.peelIface;
+        dc.timeout_ms   = 300000;
+
+        transport::tcp::peel::PeelDiscovery discovery(dc);
+        GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+        transport::tcp::peel::PeelContextConfig cfg;
+        cfg.rank          = rank;
+        cfg.world_size    = worldSize;
+        cfg.peer_ips      = discovery.peerIps();
+        cfg.mcast_group   = this->options_.peelMcastGroup;
+        cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+        cfg.iface_name    = this->options_.peelIface;
+        cfg.ttl           = this->options_.peelTTL;
+        cfg.sender_rank   = 0;
+        cfg.topology_file = this->options_.peelTopologyFile;
+        cfg.rto_ms        = this->options_.peelRtoMs;
+
+        sharedCtx_ = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
+        GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+      }
+    }
+
+    algorithm_.reset(new transport::tcp::peel::PeelAllreduceRing<T>(
+        this->context_->rank, sharedCtx_->ringHops(), ptrs, elements));
+  }
+
+  void run() override {
+    GLOO_ENFORCE(algorithm_ != nullptr, "Peel allreduce algorithm not initialized");
+    GLOO_ENFORCE(algorithm_->run(), "Peel ring allreduce failed");
+    barrier(barrierOpts_);
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const auto size = this->context_->size * this->inputs_.size();
+    const auto expected = (size * (size - 1)) / 2;
+    const auto stride = size * size;
+    constStrideVerify(
+        this->inputs_, expected, stride, this->context_->rank, errors);
+  }
+
+ protected:
+  std::unique_ptr<transport::tcp::peel::PeelAllreduceRing<T>> algorithm_;
+  BarrierOptions barrierOpts_;
+};
+
+template <typename T>
+std::shared_ptr<transport::tcp::peel::PeelContext>
+    PeelAllreduceRingBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelAllreduceRingBenchmark<T>::initMutex_;
+
 
 } // namespace
 
@@ -1647,6 +1740,10 @@ std::mutex PeelAllgatherRingBenchmark<T>::initMutex_;
   } else if (x.benchmark == "peel_allgather_ring") {                           \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherRingBenchmark<T>>(context, x);     \
+    };                                                                         \
+  } else if (x.benchmark == "peel_allreduce_ring") {                          \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllreduceRingBenchmark<T>>(context, x);     \
     };                                                                         \
   }                                                                            \
   if (!fn) {                                                                   \

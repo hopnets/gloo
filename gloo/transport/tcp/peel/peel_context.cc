@@ -154,6 +154,7 @@ bool PeelContext::initSingleTransport() {
 
 bool PeelContext::initRing() {
     ring_transports_.clear();
+    ring_hops_.clear();
     broadcast_ring_.reset();
     allgather_ring_.reset();
 
@@ -161,8 +162,9 @@ bool PeelContext::initRing() {
     hops.reserve(config_.world_size);
 
     if (config_.world_size <= 1) {
-        broadcast_ring_ = std::make_unique<PeelBroadcastRing>(hops);
-        allgather_ring_ = std::make_unique<PeelAllgatherRing>(config_.rank, std::move(hops));
+        ring_hops_ = hops;
+        broadcast_ring_ = std::make_unique<PeelBroadcastRing>(ring_hops_);
+        allgather_ring_ = std::make_unique<PeelAllgatherRing>(config_.rank, ring_hops_);
         return true;
     }
 
@@ -198,8 +200,9 @@ bool PeelContext::initRing() {
         hops.push_back(hop);
     }
 
-    broadcast_ring_ = std::make_unique<PeelBroadcastRing>(hops);
-    allgather_ring_ = std::make_unique<PeelAllgatherRing>(config_.rank, std::move(hops));
+    ring_hops_ = hops;
+    broadcast_ring_ = std::make_unique<PeelBroadcastRing>(ring_hops_);
+    allgather_ring_ = std::make_unique<PeelAllgatherRing>(config_.rank, ring_hops_);
 
     std::cout << "peel_context[" << config_.rank
               << "]: initialized ring transports ("
@@ -351,12 +354,18 @@ void PeelContext::cleanup() {
     for (auto& t : transports_)
         t->cleanup();
     transports_.clear();
-	
-	broadcast_ring_.reset();
+
+    broadcast_ring_.reset();
     allgather_ring_.reset();
+    ring_hops_.clear();
     for (auto& t : ring_transports_)
         t->cleanup();
     ring_transports_.clear();
+
+    broadcast_stop_and_wait_.reset();
+    for (auto& t : stop_and_wait_transports_)
+        t->cleanup();
+    stop_and_wait_transports_.clear();
 }
 
 } // namespace peel

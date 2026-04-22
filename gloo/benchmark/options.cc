@@ -118,6 +118,7 @@ static void usage(int status, const char* argv0) {
   X("  peel_broadcast_stop_and_wait");
   X("  peel_allgather");
   X("  peel_allgather_ring");
+  X("  peel_allreduce_ring");
   X("  broadcast_ring");
   X("  broadcast_stop_and_wait");
   X("");

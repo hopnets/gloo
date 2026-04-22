@@ -85,6 +85,8 @@ public:
     bool initRing();
     bool initStopAndWait();
 
+    const std::vector<PeelRingHop>& ringHops() const { return ring_hops_; }
+
     // Cleanup all transports.
     void cleanup();
 
@@ -101,6 +103,7 @@ private:
     std::vector<std::unique_ptr<PeelTransport>> transports_;
     std::unique_ptr<PeelBroadcast>              broadcast_;
     std::vector<std::unique_ptr<PeelTransport>> ring_transports_;
+    std::vector<PeelRingHop>                    ring_hops_;
     std::unique_ptr<PeelBroadcastRing>          broadcast_ring_;
     std::vector<std::unique_ptr<PeelTransport>> stop_and_wait_transports_;
     std::unique_ptr<PeelBroadcastStopAndWait>   broadcast_stop_and_wait_;
