@@ -73,6 +73,15 @@ class Context : public ::gloo::transport::Context,
     return peelContext_->broadcastRing(root, data, size);
   }
 
+  // Convenience: perform tree broadcast using Peel hop transports
+  // - root: rank that starts the tree broadcast
+  // - data: buffer (root sends, others receive/forward)
+  // - size: number of bytes
+  bool peelBroadcastStopAndWait(int root, void* data, size_t size) {
+    if (!isPeelReady()) return false;
+    return peelContext_->broadcastStopAndWait(root, data, size);
+  }
+
   // Convenience: perform ring allgather using Peel hop transports
   // - bufs[src]: storage for the segment contributed by rank src
   // - size: number of bytes per segment

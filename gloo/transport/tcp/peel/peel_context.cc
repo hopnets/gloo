@@ -6,6 +6,8 @@
 #include <cstring>
 #include <iostream>
 
+#include "gloo/math.h"
+
 namespace gloo {
 namespace transport {
 namespace tcp {
@@ -205,11 +207,106 @@ bool PeelContext::initRing() {
               << config_.world_size << " ring edge(s))\n";
     return true;
 }
+
+
+bool PeelContext::initStopAndWait() {
+    stop_and_wait_transports_.clear();
+    broadcast_stop_and_wait_.reset();
+
+    std::vector<PeelTreeHop> hops;
+
+    if (config_.world_size <= 1) {
+        broadcast_stop_and_wait_ = std::make_unique<PeelBroadcastStopAndWait>(
+            config_.rank,
+            config_.world_size,
+            config_.sender_rank,
+            std::move(hops));
+        return true;
+    }
+
+    const size_t dim = gloo::log2ceil(static_cast<uint32_t>(config_.world_size));
+    size_t mask = (static_cast<size_t>(1) << dim) - 1;
+    size_t edgeIndex = 0;
+
+    for (size_t level = 0; level < dim; ++level) {
+        mask ^= (static_cast<size_t>(1) << level);
+
+        for (int rank = 0; rank < config_.world_size; ++rank) {
+            const size_t vrank =
+                (static_cast<size_t>(rank) + config_.world_size - config_.sender_rank) %
+                static_cast<size_t>(config_.world_size);
+
+            if ((vrank & mask) != 0) {
+                continue;
+            }
+
+            const size_t vpeer = vrank ^ (static_cast<size_t>(1) << level);
+            if (vpeer >= static_cast<size_t>(config_.world_size)) {
+                continue;
+            }
+
+            if ((vrank & (static_cast<size_t>(1) << level)) != 0) {
+                continue;
+            }
+
+            const int parent = rank;
+            const int child =
+                static_cast<int>((vpeer + config_.sender_rank) % config_.world_size);
+
+            PeelTreeHop hop;
+            hop.parent = parent;
+            hop.child = child;
+            hop.level = level;
+
+            if (config_.rank == parent || config_.rank == child) {
+                PeelTransportConfig tc = makeBaseTransportConfig(config_);
+                tc.participant_ranks = {parent, child};
+                tc.sender_rank = parent;
+                tc.base_port = static_cast<uint16_t>(
+                    config_.base_port + edgeIndex * config_.world_size);
+
+                auto t = std::make_unique<PeelTransport>(tc);
+                if (!t->init()) {
+                    std::cerr << "peel_context[" << config_.rank
+                              << "]: stop-and-wait transport init failed for "
+                              << parent << " -> " << child << "\n";
+                    return false;
+                }
+
+                hop.transport = t.get();
+                stop_and_wait_transports_.push_back(std::move(t));
+            }
+
+            hops.push_back(hop);
+            ++edgeIndex;
+        }
+    }
+
+    broadcast_stop_and_wait_ = std::make_unique<PeelBroadcastStopAndWait>(
+        config_.rank,
+        config_.world_size,
+        config_.sender_rank,
+        std::move(hops));
+
+    std::cout << "peel_context[" << config_.rank
+              << "]: initialized stop-and-wait tree transports ("
+              << stop_and_wait_transports_.size() << " local edge transport(s))\n";
+    return true;
+}
+
+
 bool PeelContext::broadcastRing(int root, void* data, size_t size) {
     if (config_.world_size <= 1) return true;
     if (!broadcast_ring_) return false;
     return broadcast_ring_->run(root, data, size);
 }
+
+bool PeelContext::broadcastStopAndWait(int root, void* data, size_t size) {
+    if (config_.world_size <= 1 || size == 0) return true;
+    if (!broadcast_stop_and_wait_) return false;
+    return broadcast_stop_and_wait_->run(root, data, size);
+}
+
 bool PeelContext::allgatherRing(const std::vector<void*>& bufs, size_t size) {
     if (config_.world_size <= 1 || size == 0) return true;
     if (!allgather_ring_) return false;
@@ -231,6 +328,12 @@ bool PeelContext::isReady() const {
     if (!ring_transports_.empty()) {
         haveTransport = true;
         for (const auto& t : ring_transports_)
+            if (!t->isReady()) return false;
+    }
+
+    if (!stop_and_wait_transports_.empty()) {
+        haveTransport = true;
+        for (const auto& t : stop_and_wait_transports_)
             if (!t->isReady()) return false;
     }
 

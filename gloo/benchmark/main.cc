@@ -1283,6 +1283,102 @@ std::shared_ptr<transport::tcp::peel::PeelContext>
 template <typename T>
 std::mutex PeelBroadcastRingBenchmark<T>::initMutex_;
 
+
+template <typename T>
+class PeelBroadcastStopAndWaitBenchmark : public Benchmark<T> {
+  static std::shared_ptr<transport::tcp::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  PeelBroadcastStopAndWaitBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : Benchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE3);
+  }
+
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "broadcast_stop_and_wait requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "broadcast_stop_and_wait does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent broadcasts)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "broadcast_stop_and_wait requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
+
+    this->allocate(this->options_.inputs, elements);
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) {
+      return;
+    }
+
+    transport::tcp::peel::PeelDiscoveryConfig dc;
+    dc.rank         = this->context_->rank;
+    dc.world_size   = this->context_->size;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_saw_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 300000;
+
+    transport::tcp::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::tcp::peel::PeelContextConfig cfg;
+    cfg.rank          = this->context_->rank;
+    cfg.world_size    = this->context_->size;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = this->options_.peelSenderRank;
+    cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
+
+    sharedCtx_ = std::make_shared<transport::tcp::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(
+        sharedCtx_->initStopAndWait(),
+        "PeelContext stop-and-wait init failed");
+  }
+
+  void run() override {
+    GLOO_ENFORCE(
+        sharedCtx_->broadcastStopAndWait(
+            this->options_.peelSenderRank,
+            this->inputs_[0].data(),
+            this->inputs_[0].size() * sizeof(T)),
+        "Peel stop-and-wait broadcast failed");
+    barrier(barrierOpts_);
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const auto stride = this->context_->size * this->inputs_.size();
+    constStrideVerify(
+        this->inputs_,
+        this->options_.peelSenderRank,
+        stride,
+        this->context_->rank,
+        errors);
+  }
+
+ protected:
+  BarrierOptions barrierOpts_;
+};
+
+template <typename T>
+std::shared_ptr<transport::tcp::peel::PeelContext>
+    PeelBroadcastStopAndWaitBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelBroadcastStopAndWaitBenchmark<T>::initMutex_;
+
 template <typename T>
 std::shared_ptr<transport::tcp::peel::PeelAllgather>
     PeelAllgatherBenchmark<T>::sharedAllgather_;
@@ -1537,6 +1633,13 @@ std::mutex PeelAllgatherRingBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelBroadcastRingBenchmark<T>>(context, x);     \
     };                                                                         \
+  } else if (                                                                 \
+      x.benchmark == "broadcast_stop_and_wait" ||                             \
+      x.benchmark == "peel_broadcast_stop_and_wait") {                        \
+    fn = [&](std::shared_ptr<Context>& context) {                             \
+      return gloo::make_unique<PeelBroadcastStopAndWaitBenchmark<T>>(         \
+          context, x);                                                        \
+    };                                                                        \
   } else if (x.benchmark == "peel_allgather") {                                \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \

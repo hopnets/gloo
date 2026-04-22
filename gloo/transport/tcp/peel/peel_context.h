@@ -5,6 +5,7 @@
 #include "peel_broadcast.h"
 #include "peel_transport.h"
 #include "peel_broadcast_ring.h"
+#include "peel_broadcast_stop_and_wait.h"
 #include "peel_allgather_ring.h"
 
 #include <memory>
@@ -79,8 +80,10 @@ public:
     bool broadcast(int root, void* data, size_t size);
 	
 	bool broadcastRing(int root, void* data, size_t size);
+    bool broadcastStopAndWait(int root, void* data, size_t size);
     bool allgatherRing(const std::vector<void*>& bufs, size_t size);
     bool initRing();
+    bool initStopAndWait();
 
     // Cleanup all transports.
     void cleanup();
@@ -99,6 +102,8 @@ private:
     std::unique_ptr<PeelBroadcast>              broadcast_;
     std::vector<std::unique_ptr<PeelTransport>> ring_transports_;
     std::unique_ptr<PeelBroadcastRing>          broadcast_ring_;
+    std::vector<std::unique_ptr<PeelTransport>> stop_and_wait_transports_;
+    std::unique_ptr<PeelBroadcastStopAndWait>   broadcast_stop_and_wait_;
     std::unique_ptr<PeelAllgatherRing>          allgather_ring_;
 };
 
