@@ -52,7 +52,7 @@ struct PeelContextConfig {
     int rto_ms     = PEEL_DEFAULT_RTO_MS;
 
     // Buffer
-    int    rcvbuf         = 4 * 1024 * 1024;
+    int    rcvbuf         = 32 * 1024 * 1024;
     size_t max_chunk_size = PEEL_MAX_PAYLOAD;
 };
 
