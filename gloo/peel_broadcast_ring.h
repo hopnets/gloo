@@ -1,6 +1,3 @@
-// gloo/peel_broadcast.h
-// Compatibility convenience wrapper for the standalone Peel transport.
-
 #pragma once
 
 #include <cstddef>
@@ -10,7 +7,7 @@
 
 namespace gloo {
 
-struct PeelBroadcastOptions {
+struct PeelBroadcastRingOptions {
   transport::peel::PeelContext* peelContext = nullptr;
   int root = 0;
   void* ptr = nullptr;
@@ -28,20 +25,19 @@ struct PeelBroadcastOptions {
   }
 };
 
-bool isPeelAvailable(const transport::peel::PeelContext* peelContext);
-void peel_broadcast(PeelBroadcastOptions& opts);
-void peel_broadcast(
+void peel_broadcast_ring(PeelBroadcastRingOptions& opts);
+void peel_broadcast_ring(
     transport::peel::PeelContext* peelContext,
     int root,
     void* data,
     size_t size);
 
 template <typename T>
-void peel_broadcast(
+void peel_broadcast_ring(
     transport::peel::PeelContext* peelContext,
     int root,
     std::vector<T>& data) {
-  peel_broadcast(peelContext, root, data.data(), data.size() * sizeof(T));
+  peel_broadcast_ring(peelContext, root, data.data(), data.size() * sizeof(T));
 }
 
 } // namespace gloo

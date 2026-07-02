@@ -7,7 +7,6 @@
 
 namespace gloo {
 namespace transport {
-namespace tcp {
 namespace peel {
 
 // =============================================================================
@@ -16,11 +15,11 @@ namespace peel {
 
 constexpr uint16_t PEEL_DEFAULT_BASE_PORT = 50000;
 constexpr uint16_t PEEL_HEADER_SIZE = 22;
-constexpr size_t PEEL_MAX_PAYLOAD = 1450;  // Safe for most MTUs
-constexpr int PEEL_DEFAULT_TTL = 1;
-constexpr int PEEL_DEFAULT_RTO_MS = 250;
+constexpr size_t PEEL_MAX_PAYLOAD = 8900;  // Safe for most MTUs
+constexpr int PEEL_DEFAULT_TTL = 64;
+constexpr int PEEL_DEFAULT_RTO_MS = 500;
 constexpr int PEEL_DEFAULT_RETRIES = 20;
-constexpr int PEEL_DEFAULT_TIMEOUT_MS = 30000;
+constexpr int PEEL_DEFAULT_TIMEOUT_MS = 300000;
 
 // =============================================================================
 // Header (22 bytes, all multi-byte fields in network order)
@@ -76,6 +75,5 @@ std::string peel_header_to_string(const PeelHeader& h);
 std::string peel_addr_to_string(const sockaddr_in& addr);
 
 } // namespace peel
-} // namespace tcp
 } // namespace transport
 } // namespace gloo

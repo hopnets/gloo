@@ -7,6 +7,7 @@
  */
 
 #include <memory>
+#include <sstream>
 #include <string>
 #include <sstream>
 #include <thread>
@@ -22,6 +23,7 @@
 #include "gloo/allreduce_ring_chunked.h"
 #include "gloo/alltoall.h"
 #include "gloo/alltoallv.h"
+#include "gloo/barrier.h"
 #include "gloo/barrier_all_to_all.h"
 #include "gloo/barrier_all_to_one.h"
 #include "gloo/broadcast.h"
@@ -39,12 +41,10 @@
 #include "gloo/benchmark/benchmark.h"
 #include "gloo/benchmark/runner.h"
 
-
-// New for peel_broadcast!
-#include "gloo/transport/tcp/context.h"
-#include "gloo/transport/tcp/peel/peel_context.h"
-// End for peel_broadcast!
-
+#include "gloo/transport/peel/peel_allgather.h"
+#include "gloo/transport/peel/peel_allreduce_ring.h"
+#include "gloo/transport/peel/peel_context.h"
+#include "gloo/transport/peel/peel_discovery.h"
 
 using namespace gloo;
 using namespace gloo::benchmark;
@@ -629,6 +629,25 @@ class BroadcastOneToAllBenchmark : public Benchmark<T> {
 };
 
 template <typename T>
+class BroadcastRingBenchmark : public BroadcastBenchmark<T> {
+ public:
+  BroadcastRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : BroadcastBenchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE1);
+  }
+
+  void run() override {
+    broadcast_ring(this->opts_);
+    barrier(barrierOpts_);
+  }
+
+ protected:
+  BarrierOptions barrierOpts_;
+};
+
+template <typename T>
 class PairwiseExchangeBenchmark : public Benchmark<T> {
   using Benchmark<T>::Benchmark;
 
@@ -999,6 +1018,672 @@ class NewAllreduceBenchmark : public Benchmark<T> {
   allocation outputAllocation_;
 };
 
+template <typename T>
+class PeelBroadcastBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_broadcast requires --peel-iface");
+    GLOO_ENFORCE(
+        !this->options_.peelTopologyFile.empty(),
+        "peel_broadcast requires --peel-topology-file");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_broadcast does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent broadcasts)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_broadcast requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
+
+    // Use allocate() — same as BroadcastBenchmark. Fills this->inputs_[0]
+    // with the stride pattern: inputs_[0][i] = i*stride + rank.
+    // After broadcast from peelSenderRank, every rank must hold the sender's
+    // pattern (i*stride + senderRank), so a silent no-op is detectable on
+    // every rank at every index.
+    this->allocate(this->options_.inputs, elements);
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) return;
+
+    transport::peel::PeelDiscoveryConfig dc;
+    dc.rank         = this->context_->rank;
+    dc.world_size   = this->context_->size;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 300000;
+
+    transport::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::peel::PeelContextConfig cfg;
+    cfg.rank          = this->context_->rank;
+    cfg.world_size    = this->context_->size;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = this->options_.peelSenderRank;
+    cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
+    cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+
+    sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(sharedCtx_->init(), "PeelContext init failed");
+  }
+
+  void run() override {
+    sharedCtx_->broadcast(
+        this->options_.peelSenderRank,
+        this->inputs_[0].data(),
+        this->inputs_[0].size() * sizeof(T));
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    // Identical to BroadcastBenchmark::verify — stride pattern rooted at
+    // peelSenderRank. constStrideVerify checks inputs_[0][i] == i*stride + base.
+    const auto stride = this->context_->size * this->inputs_.size();
+    constStrideVerify(
+        this->inputs_,
+        this->options_.peelSenderRank,
+        stride,
+        this->context_->rank,
+        errors);
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::peel::PeelContext>
+    PeelBroadcastBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelBroadcastBenchmark<T>::initMutex_;
+
+template <typename T>
+class PeelBroadcastRingBenchmark : public Benchmark<T> {
+  static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  PeelBroadcastRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : Benchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE2);
+  }
+
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_broadcast_ring requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_broadcast_ring does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent broadcasts)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_broadcast_ring requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
+
+    this->allocate(this->options_.inputs, elements);
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) {
+      return;
+    }
+
+    transport::peel::PeelDiscoveryConfig dc;
+    dc.rank         = this->context_->rank;
+    dc.world_size   = this->context_->size;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ring_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 300000;
+
+    transport::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::peel::PeelContextConfig cfg;
+    cfg.rank          = this->context_->rank;
+    cfg.world_size    = this->context_->size;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = this->options_.peelSenderRank;
+    cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
+    cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+
+    sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+  }
+
+  void run() override {
+    GLOO_ENFORCE(
+        sharedCtx_->broadcastRing(
+            this->options_.peelSenderRank,
+            this->inputs_[0].data(),
+            this->inputs_[0].size() * sizeof(T)),
+        "Peel ring broadcast failed");
+    barrier(barrierOpts_);
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const auto stride = this->context_->size * this->inputs_.size();
+    constStrideVerify(
+        this->inputs_,
+        this->options_.peelSenderRank,
+        stride,
+        this->context_->rank,
+        errors);
+  }
+
+ protected:
+  BarrierOptions barrierOpts_;
+};
+
+// =============================================================================
+// PeelAllgatherBenchmark
+//
+// Runs world_size sequential or parallel peel broadcasts — one per sender rank
+// — so that after each run() every rank holds every other rank's data.
+//
+// Buffer layout:
+//   bufPtrs_[rank]  → inputs_[0].data()  (aligned, stride-filled via allocate)
+//   bufPtrs_[r≠rank] → recvBufs_[r].data() (zeroed, overwritten by allgather)
+//
+// Send buffer pattern (from allocate(1, elements)):
+//   inputs_[0][i] = i * worldSize + rank
+//
+// After allgather every bufPtrs_[r][i] must equal i * worldSize + r.
+// This makes every element unique across all ranks and all indices, so
+// element-level corruption is always detected.
+// =============================================================================
+template <typename T>
+class PeelAllgatherBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  // Shared across the benchmark lifetime (threads=1 enforced).
+  static std::shared_ptr<transport::peel::PeelAllgather>            sharedAllgather_;
+  static std::vector<std::shared_ptr<transport::peel::PeelContext>> sharedCtxs_;
+  static std::mutex                                                       initMutex_;
+
+  // Per-instance buffers reset on each initialize() call.
+  std::vector<std::vector<T>> recvBufs_; // one zeroed buffer per r != rank
+  std::vector<void*>          bufPtrs_;  // [rank]=inputs_[0], [r≠rank]=recvBufs_[r]
+  size_t                      dataBytes_ = 0;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_allgather requires --peel-iface");
+    GLOO_ENFORCE(
+        !this->options_.peelTopologyFile.empty(),
+        "peel_allgather requires --peel-topology-file");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_allgather does not support --threads > 1");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_allgather requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
+
+    const int rank      = this->context_->rank;
+    const int worldSize = this->context_->size;
+    dataBytes_ = elements * sizeof(T);
+
+    // allocate(1, elements) fills inputs_[0] with the stride pattern:
+    //   inputs_[0][i] = i * (worldSize * 1) + (rank * 1 + 0) = i*worldSize + rank
+    // Uses aligned_allocator, matching the framework convention used by
+    // AllgatherBenchmark, BroadcastBenchmark, etc.
+    auto inPtrs = this->allocate(1, elements);
+
+    // Zeroed receive buffers for every rank that is not this rank.
+    // The allgather will overwrite these with the sender's data.
+    recvBufs_.assign(worldSize, std::vector<T>(elements, T(0)));
+
+    // Build the flat pointer array required by PeelAllgather::run().
+    bufPtrs_.resize(worldSize);
+    for (int r = 0; r < worldSize; ++r) {
+      bufPtrs_[r] = (r == rank)
+                        ? static_cast<void*>(inPtrs[0])             // aligned send buf
+                        : static_cast<void*>(recvBufs_[r].data());  // zeroed recv buf
+    }
+
+    // Initialize shared contexts and allgather object once.
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedAllgather_) {
+      return;
+    }
+
+    transport::peel::PeelDiscoveryConfig dc;
+    dc.rank         = rank;
+    dc.world_size   = worldSize;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ag_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 300000;
+
+    transport::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    sharedCtxs_.resize(worldSize);
+    std::vector<transport::peel::PeelContext*> ctxPtrs(worldSize);
+
+    for (int r = 0; r < worldSize; ++r) {
+      transport::peel::PeelContextConfig cfg;
+      cfg.rank          = rank;
+      cfg.world_size    = worldSize;
+      cfg.sender_rank   = r;
+      cfg.peer_ips      = discovery.peerIps();
+      cfg.mcast_group   = this->options_.peelMcastGroup;
+      cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+      cfg.iface_name    = this->options_.peelIface;
+      cfg.ttl           = this->options_.peelTTL;
+      cfg.topology_file = this->options_.peelTopologyFile;
+      cfg.rto_ms        = this->options_.peelRtoMs;
+      cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+
+      sharedCtxs_[r] = std::make_shared<transport::peel::PeelContext>(cfg);
+      GLOO_ENFORCE(
+          sharedCtxs_[r]->init(),
+          "PeelContext init failed for sender_rank=", r);
+      ctxPtrs[r] = sharedCtxs_[r].get();
+    }
+
+    auto mode = this->options_.peelParallel
+                    ? transport::peel::PeelAllgatherMode::Parallel
+                    : transport::peel::PeelAllgatherMode::Sequential;
+
+    sharedAllgather_ = std::make_shared<transport::peel::PeelAllgather>(
+        ctxPtrs, mode);
+  }
+
+  void run() override {
+    sharedAllgather_->run(bufPtrs_, dataBytes_);
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const int rank = this->context_->rank;
+    const int worldSize = this->context_->size;
+    // inputs_ is populated by allocate(); inputs_[0].size() == elements.
+    const size_t elements = this->inputs_.empty() ? 0 : this->inputs_[0].size();
+    // stride matches allocate(1, elements): worldSize * numInputs = worldSize * 1
+    const int stride = worldSize;
+
+    // float16 has no operator float() or operator int() — use operator<< which
+    // IS defined for all T (float16's is in types.h, float/char use stdlib).
+    auto toStr = [](T v) -> std::string {
+      std::ostringstream oss;
+      oss << v;
+      return oss.str();
+    };
+
+    for (int r = 0; r < worldSize; ++r) {
+      // Use the aligned inputs_ buffer for our own rank; recvBufs_ for others.
+      const T* buf = (r == rank)
+                         ? this->inputs_[0].data()
+                         : reinterpret_cast<const T*>(bufPtrs_[r]);
+      for (size_t i = 0; i < elements; ++i) {
+        // allocate() pattern for sender rank r: buf[i] = i * stride + r
+        T expected = static_cast<T>(static_cast<int>(i) * stride + r);
+        if (buf[i] != expected) {
+          errors.push_back(
+              "peel_allgather rank=" + std::to_string(rank) +
+              " buf[sender=" + std::to_string(r) + "][" +
+              std::to_string(i) + "]=" + toStr(buf[i]) +
+              " expected=" + toStr(expected));
+          break; // report first mismatch per buffer, then move on
+        }
+      }
+    }
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::peel::PeelContext>
+    PeelBroadcastRingBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelBroadcastRingBenchmark<T>::initMutex_;
+
+
+template <typename T>
+class PeelBroadcastStopAndWaitBenchmark : public Benchmark<T> {
+  static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  PeelBroadcastStopAndWaitBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : Benchmark<T>(context, options) {}
+
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "broadcast_stop_and_wait requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "broadcast_stop_and_wait does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent broadcasts)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "broadcast_stop_and_wait requires --iteration-count N "
+        "(auto iteration scaling uses gloo TCP broadcast which times out "
+        "with asymmetric subtrees)");
+
+    this->allocate(this->options_.inputs, elements);
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) {
+      return;
+    }
+
+    transport::peel::PeelDiscoveryConfig dc;
+    dc.rank         = this->context_->rank;
+    dc.world_size   = this->context_->size;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_saw_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 300000;
+
+    transport::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::peel::PeelContextConfig cfg;
+    cfg.rank          = this->context_->rank;
+    cfg.world_size    = this->context_->size;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = this->options_.peelSenderRank;
+    cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
+    cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+
+    sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(
+        sharedCtx_->initStopAndWait(),
+        "PeelContext stop-and-wait init failed");
+  }
+
+  void run() override {
+    GLOO_ENFORCE(
+        sharedCtx_->broadcastStopAndWait(
+            this->options_.peelSenderRank,
+            this->inputs_[0].data(),
+            this->inputs_[0].size() * sizeof(T)),
+        "Peel stop-and-wait broadcast failed");
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const auto stride = this->context_->size * this->inputs_.size();
+    constStrideVerify(
+        this->inputs_,
+        this->options_.peelSenderRank,
+        stride,
+        this->context_->rank,
+        errors);
+  }
+
+};
+
+template <typename T>
+std::shared_ptr<transport::peel::PeelContext>
+    PeelBroadcastStopAndWaitBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelBroadcastStopAndWaitBenchmark<T>::initMutex_;
+
+template <typename T>
+std::shared_ptr<transport::peel::PeelAllgather>
+    PeelAllgatherBenchmark<T>::sharedAllgather_;
+
+template <typename T>
+std::vector<std::shared_ptr<transport::peel::PeelContext>>
+    PeelAllgatherBenchmark<T>::sharedCtxs_;
+
+template <typename T>
+std::mutex PeelAllgatherBenchmark<T>::initMutex_;
+
+// =============================================================================
+// PeelAllgatherRingBenchmark
+//
+// Ring allgather over the single-receiver Peel hop transports created by
+// PeelContext::initRing().  This follows the same round-by-round dataflow as
+// Gloo's AllgatherRing, but each logical edge uses a dedicated 2-rank Peel
+// transport: sender i -> receiver (i + 1) % worldSize.
+// =============================================================================
+template <typename T>
+class PeelAllgatherRingBenchmark : public Benchmark<T> {
+  using Benchmark<T>::Benchmark;
+
+  static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+  std::vector<std::vector<T>> recvBufs_;
+  std::vector<void*> bufPtrs_;
+  size_t dataBytes_ = 0;
+
+ public:
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_allgather_ring requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_allgather_ring does not support --threads > 1 ");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_allgather_ring requires --iteration-count N ");
+
+    const int rank = this->context_->rank;
+    const int worldSize = this->context_->size;
+    dataBytes_ = elements * sizeof(T);
+
+    auto inPtrs = this->allocate(1, elements);
+
+    recvBufs_.assign(worldSize, std::vector<T>(elements, T(0)));
+    bufPtrs_.resize(worldSize);
+    for (int r = 0; r < worldSize; ++r) {
+      bufPtrs_[r] = (r == rank)
+                        ? static_cast<void*>(inPtrs[0])
+                        : static_cast<void*>(recvBufs_[r].data());
+    }
+
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (sharedCtx_) {
+      return;
+    }
+
+    transport::peel::PeelDiscoveryConfig dc;
+    dc.rank         = rank;
+    dc.world_size   = worldSize;
+    dc.redis_host   = this->options_.redisHost;
+    dc.redis_port   = this->options_.redisPort;
+    dc.redis_prefix = this->options_.prefix + "/peel_ag_ring_ip";
+    dc.iface_name   = this->options_.peelIface;
+    dc.timeout_ms   = 300000;
+
+    transport::peel::PeelDiscovery discovery(dc);
+    GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+    transport::peel::PeelContextConfig cfg;
+    cfg.rank          = rank;
+    cfg.world_size    = worldSize;
+    cfg.peer_ips      = discovery.peerIps();
+    cfg.mcast_group   = this->options_.peelMcastGroup;
+    cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+    cfg.iface_name    = this->options_.peelIface;
+    cfg.ttl           = this->options_.peelTTL;
+    cfg.sender_rank   = 0;
+    cfg.topology_file = this->options_.peelTopologyFile;
+    cfg.rto_ms        = this->options_.peelRtoMs;
+    cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+
+    sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
+    GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+  }
+
+  void run() override {
+    GLOO_ENFORCE(
+        sharedCtx_->allgatherRing(bufPtrs_, dataBytes_),
+        "Peel ring allgather failed");
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const int rank = this->context_->rank;
+    const int worldSize = this->context_->size;
+    const size_t elements = this->inputs_.empty() ? 0 : this->inputs_[0].size();
+    const int stride = worldSize;
+
+    auto toStr = [](T v) -> std::string {
+      std::ostringstream oss;
+      oss << v;
+      return oss.str();
+    };
+
+    for (int r = 0; r < worldSize; ++r) {
+      const T* buf = (r == rank)
+                         ? this->inputs_[0].data()
+                         : reinterpret_cast<const T*>(bufPtrs_[r]);
+      for (size_t i = 0; i < elements; ++i) {
+        T expected = static_cast<T>(static_cast<int>(i) * stride + r);
+        if (buf[i] != expected) {
+          errors.push_back(
+              "peel_allgather_ring rank=" + std::to_string(rank) +
+              " buf[sender=" + std::to_string(r) + "][" +
+              std::to_string(i) + "]=" + toStr(buf[i]) +
+              " expected=" + toStr(expected));
+          break;
+        }
+      }
+    }
+  }
+};
+
+template <typename T>
+std::shared_ptr<transport::peel::PeelContext>
+    PeelAllgatherRingBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelAllgatherRingBenchmark<T>::initMutex_;
+
+template <typename T>
+class PeelAllreduceRingBenchmark : public Benchmark<T> {
+  static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
+  static std::mutex initMutex_;
+
+ public:
+  PeelAllreduceRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options)
+      : Benchmark<T>(context, options), barrierOpts_(context) {
+    barrierOpts_.setTag(0xBADC0DE4);
+  }
+
+  void initialize(size_t elements) override {
+    GLOO_ENFORCE(
+        !this->options_.peelIface.empty(),
+        "peel_allreduce_ring requires --peel-iface");
+    GLOO_ENFORCE(
+        this->options_.threads == 1,
+        "peel_allreduce_ring does not support --threads > 1 "
+        "(shared PeelContext is not safe for concurrent collectives)");
+    GLOO_ENFORCE(
+        this->options_.iterationCount > 0,
+        "peel_allreduce_ring requires --iteration-count N ");
+
+    auto ptrs = this->allocate(this->options_.inputs, elements);
+
+    {
+      std::lock_guard<std::mutex> lock(initMutex_);
+      if (!sharedCtx_) {
+        const int rank = this->context_->rank;
+        const int worldSize = this->context_->size;
+
+        transport::peel::PeelDiscoveryConfig dc;
+        dc.rank         = rank;
+        dc.world_size   = worldSize;
+        dc.redis_host   = this->options_.redisHost;
+        dc.redis_port   = this->options_.redisPort;
+        dc.redis_prefix = this->options_.prefix + "/peel_ar_ring_ip";
+        dc.iface_name   = this->options_.peelIface;
+        dc.timeout_ms   = 300000;
+
+        transport::peel::PeelDiscovery discovery(dc);
+        GLOO_ENFORCE(discovery.run(), "PeelDiscovery failed");
+
+        transport::peel::PeelContextConfig cfg;
+        cfg.rank          = rank;
+        cfg.world_size    = worldSize;
+        cfg.peer_ips      = discovery.peerIps();
+        cfg.mcast_group   = this->options_.peelMcastGroup;
+        cfg.base_port     = static_cast<uint16_t>(this->options_.peelBasePort);
+        cfg.iface_name    = this->options_.peelIface;
+        cfg.ttl           = this->options_.peelTTL;
+        cfg.sender_rank   = 0;
+        cfg.topology_file = this->options_.peelTopologyFile;
+        cfg.rto_ms        = this->options_.peelRtoMs;
+        cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+
+        sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
+        GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+      }
+    }
+
+    algorithm_.reset(new transport::peel::PeelAllreduceRing<T>(
+        this->context_->rank, sharedCtx_->ringHops(), ptrs, elements));
+  }
+
+  void run() override {
+    GLOO_ENFORCE(algorithm_ != nullptr, "Peel allreduce algorithm not initialized");
+    GLOO_ENFORCE(algorithm_->run(), "Peel ring allreduce failed");
+    barrier(barrierOpts_);
+  }
+
+  void verify(std::vector<std::string>& errors) override {
+    const auto size = this->context_->size * this->inputs_.size();
+    const auto expected = (size * (size - 1)) / 2;
+    const auto stride = size * size;
+    constStrideVerify(
+        this->inputs_, expected, stride, this->context_->rank, errors);
+  }
+
+ protected:
+  std::unique_ptr<transport::peel::PeelAllreduceRing<T>> algorithm_;
+  BarrierOptions barrierOpts_;
+};
+
+template <typename T>
+std::shared_ptr<transport::peel::PeelContext>
+    PeelAllreduceRingBenchmark<T>::sharedCtx_;
+
+template <typename T>
+std::mutex PeelAllreduceRingBenchmark<T>::initMutex_;
+
+
 } // namespace
 
 #define RUN_BENCHMARK(T)                                                       \
@@ -1064,6 +1749,10 @@ class NewAllreduceBenchmark : public Benchmark<T> {
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<BroadcastBenchmark<T>>(context, x);             \
     };                                                                         \
+  } else if (x.benchmark == "broadcast_ring") {                                \
+    fn = [&](std::shared_ptr<::gloo::Context>& context) {                      \
+      return gloo::make_unique<BroadcastRingBenchmark<T>>(context, x);         \
+    };                                                                         \
   } else if (x.benchmark == "broadcast_one_to_all") {                          \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<BroadcastOneToAllBenchmark<T>>(context, x);     \
@@ -1111,9 +1800,36 @@ class NewAllreduceBenchmark : public Benchmark<T> {
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<SendRecvStressBenchmark<T>>(context, x, true);  \
     };                                                                         \
+  } else if (x.benchmark == "peel_broadcast") {                                \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
+    };                                                                         \
+  } else if (x.benchmark == "peel_broadcast_ring") {                           \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelBroadcastRingBenchmark<T>>(context, x);     \
+    };                                                                         \
+  } else if (                                                                 \
+      x.benchmark == "broadcast_stop_and_wait" ||                             \
+      x.benchmark == "peel_broadcast_stop_and_wait") {                        \
+    fn = [&](std::shared_ptr<Context>& context) {                             \
+      return gloo::make_unique<PeelBroadcastStopAndWaitBenchmark<T>>(         \
+          context, x);                                                        \
+    };                                                                        \
+  } else if (x.benchmark == "peel_allgather") {                                \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \
+    };                                                                         \
+  } else if (x.benchmark == "peel_allgather_ring") {                           \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllgatherRingBenchmark<T>>(context, x);     \
+    };                                                                         \
+  } else if (x.benchmark == "peel_allreduce_ring") {                          \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllreduceRingBenchmark<T>>(context, x);     \
+    };                                                                         \
   }                                                                            \
   if (!fn) {                                                                   \
-    GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                   \
+    GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                 \
   }                                                                            \
   Runner r(x);                                                                 \
   r.run(fn);

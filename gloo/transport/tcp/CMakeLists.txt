@@ -16,13 +16,6 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/pair.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/socket.cc"
         "${CMAKE_CURRENT_SOURCE_DIR}/unbound_buffer.cc"
-        # Peel protocol support
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_protocol.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_redis.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_full_mesh.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_transport.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_broadcast.cc"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_context.cc"
     )
     list(APPEND GLOO_TRANSPORT_HDRS
         "${CMAKE_CURRENT_SOURCE_DIR}/address.h"
@@ -39,13 +32,6 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/pair.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/socket.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/unbound_buffer.h"
-        # Peel protocol headers
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_protocol.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_redis.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_full_mesh.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_transport.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_broadcast.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/peel/peel_context.h"
     )
 endif()
 
@@ -53,8 +39,6 @@ if(GLOO_HAVE_TRANSPORT_TCP_TLS)
     add_subdirectory(tls)
 endif()
 
-# Add peel subdirectory for test executables
-add_subdirectory(peel)
 
 set(GLOO_TRANSPORT_SRCS ${GLOO_TRANSPORT_SRCS} PARENT_SCOPE)
 set(GLOO_TRANSPORT_HDRS ${GLOO_TRANSPORT_HDRS} PARENT_SCOPE)

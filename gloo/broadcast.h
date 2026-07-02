@@ -84,8 +84,10 @@ class BroadcastOptions {
   std::chrono::milliseconds timeout;
 
   friend void broadcast(BroadcastOptions&);
+  friend void broadcast_ring(BroadcastOptions&);
 };
 
 void broadcast(BroadcastOptions& opts);
+void broadcast_ring(BroadcastOptions& opts);
 
 } // namespace gloo

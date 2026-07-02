@@ -40,7 +40,7 @@ static void usage(int status, const char* argv0) {
   X("      --shared-path=PATH File system rendezvous with this shared path");
   X("");
   X("Transport:");
-  X("  -t, --transport=TRANSPORT Transport to use (tcp, ibverbs, ...)");
+  X("  -t, --transport=TRANSPORT Transport to use (tcp, ibverbs, peel, ...)");
   X("      --sync=BOOL           Switch pairs to sync mode (default: false)");
   X("      --busy-poll=BOOL      Busy-poll in sync mode (default: false)");
   X("");
@@ -59,6 +59,24 @@ static void usage(int status, const char* argv0) {
   X("      --ib-device=DEV[,DEV...]  InfiniBand device(s) to use (default: mlx5_0)");
   X("      --ib-port=PORT            InfiniBand port to use (default: 1)");
   X("      --ib-index=INDEX          InfiniBand index to use (default: 0)");
+  X("");
+  X("Transport configuration for \"peel\":");
+  X("");
+  X("  Note: --transport=peel is a benchmark convenience mode. Peel carries");
+  X("  the benchmark data path; TCP is still used internally for rendezvous");
+  X("  and barriers until Peel implements Gloo's native Device/Context API.");
+  X("  By default the control TCP device uses --peel-iface, so --tcp-device");
+  X("  is not needed for Peel-only benchmark commands.");
+  X("");
+  X("      --peel-iface=IFACE         NIC for multicast, e.g. eth0 (required)");
+  X("      --peel-mcast-group=IP      Multicast group (default: 239.255.0.1)");
+  X("      --peel-base-port=PORT      Base UDP port (default: 50000)");
+  X("      --peel-ttl=N               Multicast TTL (default: 64)");
+  X("      --peel-sender-rank=N       Broadcast root rank (default: 0)");
+  X("      --peel-topology-file=PATH  Topology file (required for tree mode)");
+  X("      --peel-parallel            Allgather: run N broadcasts concurrently (default: sequential)");
+  X("      --peel-rto=MS              Stop-and-wait retransmission timeout in ms (default: 500)");
+  X("      --peel-max-payload=BYTES   Max app payload per Peel packet; 0 = MTU auto (default: 0)");
   X("");
   X("Benchmark parameters:");
   X("      --no-verify        Do not verify results of first iteration");
@@ -119,11 +137,14 @@ static void usage(int status, const char* argv0) {
   X("  sendrecv_roundtrip");
   X("  sendrecv_stress");
   X("  isendirecv_stress");
-
-  // New for peel_broadcast!
   X("  peel_broadcast");
-  // End for peel_broadcast!
-
+  X("  peel_broadcast_ring");
+  X("  peel_broadcast_stop_and_wait");
+  X("  peel_allgather");
+  X("  peel_allgather_ring");
+  X("  peel_allreduce_ring");
+  X("  broadcast_ring");
+  X("  broadcast_stop_and_wait");
   X("");
 
   exit(status);
@@ -199,18 +220,16 @@ struct options parseOptions(int argc, char** argv) {
       {"cert", required_argument, nullptr, 0x2002},
       {"ca-file", required_argument, nullptr, 0x2003},
       {"ca-path", required_argument, nullptr, 0x2004},
-      {"help", no_argument, nullptr, 0xffff},
-      
-      //New for peel_broadcast!
-      {"messages", required_argument, nullptr, 0x1013},
-      {"peel-enable", no_argument, nullptr, 0x3001},
+      {"peel-iface", required_argument, nullptr, 0x3001},
       {"peel-mcast-group", required_argument, nullptr, 0x3002},
-      {"peel-mcast-port", required_argument, nullptr, 0x3003},
-      {"peel-iface", required_argument, nullptr, 0x3004},
-      {"pkey", required_argument, nullptr, 0x2001},
-      //End for peel_broadcast!
-      
-      
+      {"peel-base-port", required_argument, nullptr, 0x3003},
+      {"peel-ttl", required_argument, nullptr, 0x3004},
+      {"peel-sender-rank", required_argument, nullptr, 0x3005},
+      {"peel-topology-file", required_argument, nullptr, 0x3006},
+      {"peel-parallel",      no_argument,       nullptr, 0x3007},
+      {"help", no_argument, nullptr, 0xffff},
+      {"peel-rto",           required_argument, nullptr, 0x3008},
+      {"peel-max-payload",   required_argument, nullptr, 0x3009},
       {nullptr, 0, nullptr, 0}};
 
   int opt;
@@ -399,7 +418,52 @@ struct options parseOptions(int argc, char** argv) {
         result.caPath = std::string(optarg, strlen(optarg));
         break;
       }
-      case 0xffff: // --help
+      case 0x3001:
+      {
+        result.peelIface = std::string(optarg, strlen(optarg));
+        break;
+      }
+      case 0x3002:
+      {
+        result.peelMcastGroup = std::string(optarg, strlen(optarg));
+        break;
+      }
+      case 0x3003:
+      {
+        result.peelBasePort = atoi(optarg);
+        break;
+      }
+      case 0x3004:
+      {
+        result.peelTTL = atoi(optarg);
+        break;
+      }
+      case 0x3005:
+      {
+        result.peelSenderRank = atoi(optarg);
+        break;
+      }
+      case 0x3006:
+      {
+        result.peelTopologyFile = std::string(optarg, strlen(optarg));
+        break;
+      }
+      case 0x3007:
+      {
+        result.peelParallel = true;
+        break;
+      }
+      case 0x3008:
+      {
+        result.peelRtoMs = atoi(optarg);
+        break;
+      }
+      case 0x3009:
+      {
+        result.peelMaxPayload = atoi(optarg);
+        break;
+      }
+      case 0xffff:
       {
         usage(EXIT_SUCCESS, argv[0]);
         break;

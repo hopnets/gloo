@@ -8,7 +8,6 @@ struct redisContext;
 
 namespace gloo {
 namespace transport {
-namespace tcp {
 namespace peel {
 
 class PeelRedis {
@@ -22,6 +21,10 @@ public:
     bool connect();
     void disconnect();
     bool isConnected() const;
+
+    // Disconnect then reconnect. Useful when the context has entered an error
+    // state (e.g. STATUS/NULL reply) and needs to be reset.
+    bool reconnect();
 
     bool set(const std::string& key, const std::string& value);
     std::string get(const std::string& key);
@@ -39,6 +42,5 @@ private:
 };
 
 } // namespace peel
-} // namespace tcp
 } // namespace transport
 } // namespace gloo

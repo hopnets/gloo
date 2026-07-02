@@ -8,7 +8,6 @@
 
 namespace gloo {
 namespace transport {
-namespace tcp {
 namespace peel {
 
 using Clock = std::chrono::steady_clock;
@@ -95,6 +94,5 @@ std::string peel_addr_to_string(const sockaddr_in& addr) {
 }
 
 } // namespace peel
-} // namespace tcp
 } // namespace transport
 } // namespace gloo

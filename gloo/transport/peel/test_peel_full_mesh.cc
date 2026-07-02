@@ -3,28 +3,29 @@
 #include <cstdlib>
 #include <iostream>
 
-using namespace gloo::transport::tcp::peel;
+using namespace gloo::transport::peel;
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <rank> <world_size> [redis_host]\n";
+        std::cerr << "Usage: " << argv[0] << " <rank> <world_size> [iface]\n";
         return 1;
     }
 
-    int rank = std::atoi(argv[1]);
+    int rank       = std::atoi(argv[1]);
     int world_size = std::atoi(argv[2]);
-    std::string redis_host = argc > 3 ? argv[3] : "127.0.0.1";
+    std::string iface      = argc > 3 ? argv[3] : "";
 
     PeelFullMeshConfig config;
-    config.rank = rank;
-    config.world_size = world_size;
-    config.redis_host = redis_host;
+    config.rank        = rank;
+    config.world_size  = world_size;
     config.mcast_group = "239.255.0.1";
-    config.base_port = 50000;
+    config.base_port   = 50000;
+    if (!iface.empty())
+        config.iface_name = iface;
 
     std::cerr << "=== Test PeelFullMesh ===\n";
     std::cerr << "rank=" << rank << ", world_size=" << world_size
-              << ", redis=" << redis_host << "\n";
+              << ", iface=" << iface << "\n";
 
     PeelFullMesh mesh(config);
 
@@ -47,11 +48,6 @@ int main(int argc, char** argv) {
     for (const auto& ch : result->recv_channels) {
         std::cerr << "    from rank " << ch->owner_rank
                   << ": port=" << ch->port << ", fd=" << ch->fd << "\n";
-    }
-
-    // Cleanup (only rank 0)
-    if (rank == 0) {
-        mesh.cleanup();
     }
 
     return 0;

@@ -72,6 +72,17 @@ struct options {
   std::string cert;
   std::string caFile;
   std::string caPath;
+
+  // Peel broadcast
+  std::string peelMcastGroup   = "239.255.0.1";
+  std::string peelIface;
+  int         peelBasePort     = 50000;
+  int         peelTTL          = 64;
+  int         peelSenderRank   = 0;
+  std::string peelTopologyFile;
+  bool        peelParallel     = false;
+  int         peelRtoMs        = 500;
+  int         peelMaxPayload   = 0;
 };
 
 struct options parseOptions(int argc, char** argv);

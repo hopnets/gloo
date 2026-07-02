@@ -39,9 +39,6 @@ Context::Context(std::shared_ptr<Device> device, int rank, int size)
 }
 
 Context::~Context() {
-  // Cleanup Peel if enabled
-  disablePeel();
-
   if (device_->isLazyInit()) {
     // We need to shutdown the loop thread prior to freeing the pairs as
     // connection callbacks may be called after we free the pairs leading to
@@ -422,32 +419,6 @@ std::vector<char> Rank::bytes() const {
   return buf;
 }
 
-// ---------------------------------------------------------------------------
-// Peel Implementation
-// ---------------------------------------------------------------------------
-
-void Context::enablePeel(const peel::PeelContextConfig& config) {
-    //std::cerr << "enablePeel() called on Context @ " << this 
-    //        << " for rank " << config.rank 
-    //        << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";
-
-    if (peelContext_) {
-    std::cerr << "peel: already enabled\n";
-    return;
-  }
-
-   //std::cerr << "peel: creating new PeelContext...\n";
-  peelContext_ = std::make_unique<peel::PeelContext>(config);
-   //std::cerr << "peel: calling init()...\n";
-  if (!peelContext_->init()) {
-    std::cerr << "peel: initialization failed\n";
-    peelContext_.reset();
-    return;
-  }
-
-  //std::cerr << "peel: enabled and ready for rank " << config.rank
-  //          << " (world_size=" << config.world_size << ")\n";
-}
 
 } // namespace tcp
 } // namespace transport
