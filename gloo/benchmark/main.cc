@@ -9,8 +9,6 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <sstream>
-#include <thread>
 
 #include "gloo/allgather.h"
 #include "gloo/allgather_ring.h"
@@ -53,81 +51,6 @@ namespace {
 
 // constant offset used for alltoall when populating input data
 constexpr int kAlltoallOffset = 127;
-
-
-
-// New for peel_broadcast!
-// Peel broadcast benchmark
-template <typename T>
-class PeelBroadcastBenchmark : public Benchmark<T> {
-  using Benchmark<T>::Benchmark;
-
- public:
-  PeelBroadcastBenchmark(
-      std::shared_ptr<::gloo::Context>& context,
-      struct options& options)
-      : Benchmark<T>(context, options) {}
-
-  void initialize(size_t elements) override {
-    // Allocate input buffer
-    auto inPtrs = this->allocate(this->options_.inputs, elements);
-    dataPtr_ = inPtrs.front();
-    dataSize_ = elements * sizeof(T);
-    
-    // Initialize data on root
-    if (this->context_->rank == 0) {
-      for (size_t i = 0; i < elements; i++) {
-        dataPtr_[i] = static_cast<T>(i);
-      }
-    }
-  }
-
-  void run() override {
-    //std::cerr << "Rank " << this->context_->rank << ": run() called\n";
-    // Get the transport context properly
-    auto transportCtx = this->context_->getTransportContext();
-    auto* tcpContext = dynamic_cast<gloo::transport::tcp::Context*>(transportCtx.get());
-    
-    
-    if (!tcpContext->isPeelReady()) {
-      throw std::runtime_error("Peel not initialized");
-    }
-
-    //std::cerr << "Rank " << this->context_->rank << ": Starting peelBroadcast...\n";
-
-    // Use rank 0 as root
-    const int rootRank = 0;
-    tcpContext->peelBroadcast(rootRank, dataPtr_, dataSize_);
-    //std::cerr << "Rank " << this->context_->rank << ": peelBroadcast completed!\n";
-  }
-
-  void verify(std::vector<std::string>& errors) override {
-    // Verify that all ranks have the same data as root
-    size_t numElements = dataSize_ / sizeof(T);
-    for (size_t i = 0; i < numElements; i++) {
-      T expected = static_cast<T>(i);
-      if (dataPtr_[i] != expected) {
-        std::stringstream ss;
-        ss << "Rank " << this->context_->rank 
-           << ": Mismatch at index " << i
-           << ": expected " << expected 
-           << ", got " << dataPtr_[i];
-        errors.push_back(ss.str());
-        if (errors.size() >= 10) {
-          return;
-        }
-      }
-    }
-  }
-
- protected:
-  T* dataPtr_;
-  size_t dataSize_;
-};
-// End of peel_broadcast!
-
-
-
 // constant slot used for send/recv
 constexpr uint64_t kSlot = 0x1337;
 // exact number of processes needed for send/recv benchmarks
@@ -1732,10 +1655,6 @@ std::mutex PeelAllreduceRingBenchmark<T>::initMutex_;
   } else if (x.benchmark == "alltoall_v") {                                    \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<AllToAllvBenchmark<T>>(context, x);             \
-    };                                                                         \
-  } else if (x.benchmark == "peel_broadcast") {                                \
-    fn = [&](std::shared_ptr<Context>& context) {                              \
-      return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
     };                                                                         \
   } else if (x.benchmark == "barrier_all_to_all") {                            \
     fn = [&](std::shared_ptr<Context>& context) {                              \

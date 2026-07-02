@@ -27,15 +27,8 @@ namespace tcp {
 constexpr int kDefaultBatchSize = 128;
 
 Context::Context(std::shared_ptr<Device> device, int rank, int size)
-    : ::gloo::transport::Context(rank, size), device_(std::move(device)),
-    peelContext_(nullptr) {
-    
-    // Explicitly set to nullptr again just to be sure
-  peelContext_ = nullptr;
-  //std::cerr << "Context constructor called for rank " << rank 
-  //          << " @ " << this
-  //          << ", peelContext_ = " << (peelContext_ ? "SET" : "NULL") << "\n";	    
-    connecting_.resize(size);
+    : ::gloo::transport::Context(rank, size), device_(std::move(device)) {
+  connecting_.resize(size);
 }
 
 Context::~Context() {
