@@ -10,11 +10,26 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <climits>
+#include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #include "gloo/common/logging.h"
+#include "gloo/config.h"
 #include "gloo/math.h"
 #include "gloo/types.h"
+
+#if GLOO_HAVE_TRANSPORT_PEEL
+#include "gloo/transport/peel/peel_allreduce_ring.h"
+#include "gloo/transport/peel/peel_context.h"
+#endif
 
 namespace gloo {
 
@@ -24,6 +39,194 @@ using BufferVector = std::vector<std::unique_ptr<transport::UnboundBuffer>>;
 using ReductionFunction = AllreduceOptions::Func;
 using ReduceRangeFunction = std::function<void(size_t, size_t)>;
 using BroadcastRangeFunction = std::function<void(size_t, size_t)>;
+
+enum class AllreduceAlgorithm {
+  DEFAULT,
+  PEEL_ALLREDUCE_RING,
+};
+
+std::string getEnv(const char* name) {
+  const char* value = std::getenv(name);
+  return value == nullptr ? std::string() : std::string(value);
+}
+
+long parseLongEnv(
+    const char* name,
+    long defaultValue,
+    long minValue,
+    long maxValue) {
+  const auto value = getEnv(name);
+  if (value.empty()) {
+    return defaultValue;
+  }
+
+  errno = 0;
+  char* end = nullptr;
+  const long parsed = std::strtol(value.c_str(), &end, 10);
+  GLOO_ENFORCE(
+      errno == 0 && end != value.c_str() && *end == '\0',
+      "Invalid integer value for ",
+      name,
+      ": ",
+      value);
+  GLOO_ENFORCE(
+      parsed >= minValue && parsed <= maxValue,
+      name,
+      " must be between ",
+      minValue,
+      " and ",
+      maxValue,
+      "; got ",
+      parsed);
+  return parsed;
+}
+
+bool getBoolEnv(const char* name) {
+  const auto value = getEnv(name);
+  return value == "1" || value == "true" || value == "TRUE" ||
+      value == "yes" || value == "YES";
+}
+
+AllreduceAlgorithm getAllreduceAlgorithm() {
+  const auto value = getEnv("GLOO_ALLREDUCE_ALGORITHM");
+  if (value.empty() || value == "default" || value == "allreduce") {
+    return AllreduceAlgorithm::DEFAULT;
+  }
+  if (value == "peel" || value == "peel_allreduce_ring") {
+    return AllreduceAlgorithm::PEEL_ALLREDUCE_RING;
+  }
+
+  GLOO_ENFORCE(false, "Unsupported GLOO_ALLREDUCE_ALGORITHM: ", value);
+  return AllreduceAlgorithm::DEFAULT;
+}
+
+#if GLOO_HAVE_TRANSPORT_PEEL
+
+std::string getPeelInterface() {
+  auto iface = getEnv("GLOO_PEEL_IFACE");
+  if (!iface.empty()) {
+    return iface;
+  }
+
+  iface = getEnv("GLOO_SOCKET_IFNAME");
+  const auto separator = iface.find(',');
+  if (separator != std::string::npos) {
+    iface.resize(separator);
+  }
+  return iface;
+}
+
+class PeelAllreduceRingRuntime {
+ public:
+  static PeelAllreduceRingRuntime& instance() {
+    static PeelAllreduceRingRuntime runtime;
+    return runtime;
+  }
+
+  void run(
+      const std::shared_ptr<Context>& glooContext,
+      const std::vector<void*>& ptrs,
+      size_t elements,
+      size_t elementSize,
+      ReductionFunction reduce,
+      std::chrono::milliseconds timeout) {
+    initialize(glooContext, timeout);
+
+    std::lock_guard<std::mutex> operationLock(operationMutex_);
+    ++operationCount_;
+    if (trace_) {
+      std::cout << "gloo peel_allreduce_ring: rank=" << rank_
+                << " operation=" << operationCount_
+                << " elements=" << elements
+                << " bytes=" << elements * elementSize << "\n";
+    }
+
+    transport::peel::PeelAllreduceRingGeneric algorithm(
+        rank_,
+        peelContext_->ringHops(),
+        ptrs,
+        elements,
+        elementSize,
+        std::move(reduce));
+    GLOO_ENFORCE(algorithm.run(), "peel_allreduce_ring failed");
+  }
+
+ private:
+  void initialize(
+      const std::shared_ptr<Context>& glooContext,
+      std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> lock(initializationMutex_);
+
+    if (peelContext_) {
+      GLOO_ENFORCE_EQ(rank_, glooContext->rank);
+      GLOO_ENFORCE_EQ(worldSize_, glooContext->size);
+      return;
+    }
+
+    const auto iface = getPeelInterface();
+    GLOO_ENFORCE(
+        !iface.empty(),
+        "peel_allreduce_ring requires GLOO_PEEL_IFACE or "
+        "GLOO_SOCKET_IFNAME");
+
+    const auto allreduceBasePort = getEnv("GLOO_PEEL_ALLREDUCE_BASE_PORT");
+    const auto basePort = allreduceBasePort.empty()
+        ? parseLongEnv("GLOO_PEEL_BASE_PORT", 52000, 1, 65535)
+        : parseLongEnv("GLOO_PEEL_ALLREDUCE_BASE_PORT", 52000, 1, 65535);
+    const long maxPort =
+        basePort + static_cast<long>(glooContext->size) * glooContext->size - 1;
+    GLOO_ENFORCE(
+        maxPort <= 65535,
+        "Peel allreduce base port and world size require ports through ",
+        maxPort,
+        ", which exceeds 65535");
+
+    const auto timeoutCount = timeout.count();
+    const long defaultTimeout = timeoutCount > 0
+        ? std::min<long long>(timeoutCount, INT_MAX)
+        : 300000;
+
+    transport::peel::PeelContextConfig config;
+    config.rank = glooContext->rank;
+    config.world_size = glooContext->size;
+    config.mcast_group = getEnv("GLOO_PEEL_MCAST_GROUP");
+    if (config.mcast_group.empty()) {
+      config.mcast_group = "239.255.0.1";
+    }
+    config.base_port = static_cast<uint16_t>(basePort);
+    config.iface_name = iface;
+    config.ttl = static_cast<int>(
+        parseLongEnv("GLOO_PEEL_TTL", 64, 1, 255));
+    config.rto_ms = static_cast<int>(
+        parseLongEnv("GLOO_PEEL_RTO_MS", 500, 1, INT_MAX));
+    config.timeout_ms = static_cast<int>(parseLongEnv(
+        "GLOO_PEEL_TIMEOUT_MS", defaultTimeout, 1, INT_MAX));
+    config.rcvbuf = static_cast<int>(parseLongEnv(
+        "GLOO_PEEL_RCVBUF", 32 * 1024 * 1024, 1, INT_MAX));
+    config.max_chunk_size = static_cast<size_t>(parseLongEnv(
+        "GLOO_PEEL_MAX_PAYLOAD", 0, 0, INT_MAX));
+    config.dscp = static_cast<uint8_t>(
+        parseLongEnv("GLOO_PEEL_DSCP", 7, 0, 63));
+
+    auto context = std::make_unique<transport::peel::PeelContext>(config);
+    GLOO_ENFORCE(context->initRing(), "PeelContext ring initialization failed");
+
+    rank_ = glooContext->rank;
+    worldSize_ = glooContext->size;
+    trace_ = getBoolEnv("GLOO_PEEL_TRACE");
+    peelContext_ = std::move(context);
+  }
+
+  std::mutex initializationMutex_;
+  std::mutex operationMutex_;
+  int rank_ = -1;
+  int worldSize_ = -1;
+  size_t operationCount_ = 0;
+  bool trace_ = false;
+  std::unique_ptr<transport::peel::PeelContext> peelContext_;
+};
+
+#endif
 
 // Forward declaration of ring algorithm implementation.
 void ring(
@@ -129,6 +332,26 @@ void allreduce(const detail::AllreduceOptionsImpl& opts) {
     reduceInputs(0, totalBytes);
     broadcastOutputs(0, totalBytes);
     return;
+  }
+
+  const auto selectedAlgorithm = getAllreduceAlgorithm();
+  if (selectedAlgorithm == AllreduceAlgorithm::PEEL_ALLREDUCE_RING) {
+#if GLOO_HAVE_TRANSPORT_PEEL
+    reduceInputs(0, totalBytes);
+    PeelAllreduceRingRuntime::instance().run(
+        context,
+        {out[0]->ptr},
+        opts.elements,
+        opts.elementSize,
+        opts.reduce,
+        opts.timeout);
+    broadcastOutputs(0, totalBytes);
+    return;
+#else
+    GLOO_ENFORCE(
+        false,
+        "peel_allreduce_ring was requested but Gloo was built without Peel");
+#endif
   }
 
   switch (opts.algorithm) {
