@@ -75,6 +75,10 @@ struct options {
   bool        peelParallel     = false;
   int         peelRtoMs        = 500;
   int         peelMaxPayload   = 0;
+  float       peelRenoDupackPct = 50.0f;
+  int         peelRenoTaggMs = 100;
+  int         peelRenoOooBuf = 64;
+  bool        peelRenoRtoResetOnAck = true;
 };
 
 struct options parseOptions(int argc, char** argv);

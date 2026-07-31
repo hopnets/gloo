@@ -18,6 +18,7 @@ list(APPEND GLOO_TRANSPORT_SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/peel_redis.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/peel_full_mesh.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/peel_transport.cc"
+  "${CMAKE_CURRENT_SOURCE_DIR}/peel_transport_reno.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/peel_broadcast.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/peel_broadcast_ring.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/peel_broadcast_stop_and_wait.cc"

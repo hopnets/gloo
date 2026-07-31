@@ -53,6 +53,10 @@ struct PeelContextConfig {
     // Buffer
     int    rcvbuf         = 32 * 1024 * 1024;
     size_t max_chunk_size = 0;
+    float reno_dupack_pct = 50.0f;
+    int reno_tagg_ms = 100;
+    uint32_t reno_ooo_buffer_segments = 64;
+    bool reno_rto_reset_on_ack = true;
 };
 
 // Owns all subtree transports and the PeelBroadcast that orchestrates them.
@@ -82,6 +86,7 @@ public:
     bool broadcastStopAndWait(int root, void* data, size_t size);
     bool allgatherRing(const std::vector<void*>& bufs, size_t size);
     bool initRing();
+    bool initRingReno();
     bool initStopAndWait();
 
     const std::vector<PeelRingHop>& ringHops() const { return ring_hops_; }
@@ -97,6 +102,7 @@ private:
     // Fallback path: one transport, all ranks, no CIDR rules.
     // Used when no topology file is provided or peer_ips is empty.
     bool initSingleTransport();
+    bool initRingWithCongestionControl(PeelCongestionControl mode);
 
     PeelContextConfig                           config_;
     std::vector<std::unique_ptr<PeelTransport>> transports_;

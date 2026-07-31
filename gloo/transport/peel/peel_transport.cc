@@ -156,6 +156,17 @@ PeelTransport::~PeelTransport() {
 }
 
 bool PeelTransport::init() {
+    if (config_.congestion_control == PeelCongestionControl::Reno &&
+        (config_.reno_dupack_pct <= 0.0f ||
+         config_.reno_dupack_pct > 100.0f ||
+         config_.reno_tagg_ms <= 0 ||
+         config_.reno_ooo_buffer_segments == 0 ||
+         config_.reno_initial_cwnd < 1.0 ||
+         config_.reno_initial_ssthresh < 2.0)) {
+        std::cerr << "peel_transport[" << config_.rank
+                  << "]: invalid Reno configuration\n";
+        return false;
+    }
     PeelFullMeshConfig mesh_config;
     mesh_config.mcast_group          = config_.mcast_group;
     mesh_config.base_port            = config_.base_port;
@@ -300,6 +311,13 @@ void PeelTransport::workerLoop() {
 // =============================================================================
 
 bool PeelTransport::send(const void* data, size_t size) {
+    if (config_.congestion_control == PeelCongestionControl::Reno) {
+        return sendReno(data, size);
+    }
+    return sendStopAndWait(data, size);
+}
+
+bool PeelTransport::sendStopAndWait(const void* data, size_t size) {
     if (!isReady() || !mesh_result_->send_channel) return false;
 
     const auto* ptr = static_cast<const uint8_t*>(data);
@@ -355,14 +373,17 @@ bool PeelTransport::send(const void* data, size_t size) {
 }
 
 bool PeelTransport::sendPacket(uint32_t seq, uint16_t flags,
-                               const void* payload, size_t len) {
+                               const void* payload, size_t len,
+                               uint8_t retrans_id, uint32_t tsval,
+                               uint16_t window) {
     auto* ch = mesh_result_->send_channel.get();
     if (!ch || ch->fd < 0) return false;
 
     // Build PeelHeader + app payload as the UDP payload
     PeelHeader hdr{};
     peel_fill_header(hdr, seq, flags, ch->port,
-                     static_cast<uint8_t>(config_.rank), 1);
+                     static_cast<uint8_t>(config_.rank), retrans_id,
+                     tsval, 0, window);
     peel_set_header_checksum(hdr);
 
     std::vector<uint8_t> udp_payload(PEEL_HEADER_SIZE + len);
@@ -423,6 +444,14 @@ bool PeelTransport::sendPacket(uint32_t seq, uint16_t flags,
 // =============================================================================
 
 ssize_t PeelTransport::recv(int from_rank, void* data, size_t max_size, int timeout_ms) {
+    if (config_.congestion_control == PeelCongestionControl::Reno) {
+        return recvReno(from_rank, data, max_size, timeout_ms);
+    }
+    return recvStopAndWait(from_rank, data, max_size, timeout_ms);
+}
+
+ssize_t PeelTransport::recvStopAndWait(
+        int from_rank, void* data, size_t max_size, int timeout_ms) {
     if (!isReady()) return -1;
 
     auto* ch = mesh_result_->getRecvChannel(from_rank);
@@ -671,14 +700,15 @@ bool PeelTransport::recvPacket(int from_rank, PeelHeader& hdr,
 
 void PeelTransport::sendAck(uint32_t dst_ip_n, uint16_t dst_port_h,
                             const uint8_t dst_mac[6],
-                            uint32_t seq, uint32_t tsecr, uint8_t retrans_id) {
+                            uint32_t seq, uint32_t tsecr, uint8_t retrans_id,
+                            uint16_t window) {
     auto* ch = mesh_result_->send_channel.get();
     if (!ch || ch->fd < 0) return;
 
     PeelHeader ack{};
     peel_fill_header(ack, seq, FLG_ACK, ch->port,
                      static_cast<uint8_t>(config_.rank), retrans_id,
-                     peel_now_ms(), tsecr);
+                     peel_now_ms(), tsecr, window);
     peel_set_header_checksum(ack);
 
     uint8_t frame[14 + 20 + 8 + PEEL_HEADER_SIZE];

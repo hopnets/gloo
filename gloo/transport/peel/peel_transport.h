@@ -18,6 +18,11 @@ namespace gloo {
 namespace transport {
 namespace peel {
 
+enum class PeelCongestionControl {
+    StopAndWait,
+    Reno,
+};
+
 // =============================================================================
 // Transport Configuration
 // =============================================================================
@@ -33,6 +38,15 @@ struct PeelTransportConfig {
     int rcvbuf = 4 * 1024 * 1024;
     int rto_ms = PEEL_DEFAULT_RTO_MS;
     int timeout_ms = PEEL_DEFAULT_TIMEOUT_MS;
+
+    PeelCongestionControl congestion_control =
+        PeelCongestionControl::StopAndWait;
+    float reno_dupack_pct = 50.0f;
+    int reno_tagg_ms = 100;
+    uint32_t reno_ooo_buffer_segments = 64;
+    bool reno_rto_reset_on_ack = true;
+    double reno_initial_cwnd = 1.0;
+    double reno_initial_ssthresh = 65536.0;
 
     // Subset of ranks in this transport's mesh (matches PeelSubtree::receiver_ranks).
     // Empty means all ranks 0..world_size-1.
@@ -115,8 +129,22 @@ public:
     void cleanup();
 
 private:
+    bool sendStopAndWait(const void* data, size_t size);
+    ssize_t recvStopAndWait(
+        int from_rank, void* data, size_t max_size, int timeout_ms);
+    bool sendReno(const void* data, size_t size);
+    ssize_t recvReno(
+        int from_rank, void* data, size_t max_size, int timeout_ms);
+
     // Send a single packet
-    bool sendPacket(uint32_t seq, uint16_t flags, const void* payload, size_t len);
+    bool sendPacket(
+        uint32_t seq,
+        uint16_t flags,
+        const void* payload,
+        size_t len,
+        uint8_t retrans_id = 1,
+        uint32_t tsval = 0,
+        uint16_t window = 1);
 
     // Receive a packet from specific rank
     bool recvPacket(int from_rank, PeelHeader& hdr,
@@ -131,7 +159,8 @@ private:
 
     // Send a unicast ACK frame back to the sender
     void sendAck(uint32_t dst_ip_n, uint16_t dst_port_h, const uint8_t dst_mac[6],
-                 uint32_t seq, uint32_t tsecr, uint8_t retrans_id);
+                 uint32_t seq, uint32_t tsecr, uint8_t retrans_id,
+                 uint16_t window = 1);
 
     // =========================================================================
     // Worker thread
@@ -161,6 +190,7 @@ private:
     PeelTransportConfig                  config_;
     std::unique_ptr<PeelFullMeshResult>  mesh_result_;
     uint32_t                             next_seq_ = 1;
+    uint32_t                             reno_recv_next_seq_ = 1;
     uint16_t                             ip_id_    = 0;
 
     std::thread             worker_;

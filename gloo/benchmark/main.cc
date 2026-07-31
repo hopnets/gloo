@@ -1040,8 +1040,10 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
  public:
   PeelBroadcastRingBenchmark(
       std::shared_ptr<::gloo::Context>& context,
-      struct options& options)
-      : Benchmark<T>(context, options), barrierOpts_(context) {
+      struct options& options,
+      bool useReno = false)
+      : Benchmark<T>(context, options),
+        barrierOpts_(context), useReno_(useReno) {
     barrierOpts_.setTag(0xBADC0DE2);
   }
 
@@ -1071,7 +1073,8 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
     dc.world_size   = this->context_->size;
     dc.redis_host   = this->options_.redisHost;
     dc.redis_port   = this->options_.redisPort;
-    dc.redis_prefix = this->options_.prefix + "/peel_ring_ip";
+    dc.redis_prefix = this->options_.prefix +
+        (useReno_ ? "/peel_ring_reno_ip" : "/peel_ring_ip");
     dc.iface_name   = this->options_.peelIface;
     dc.timeout_ms   = 300000;
 
@@ -1090,9 +1093,16 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
     cfg.topology_file = this->options_.peelTopologyFile;
     cfg.rto_ms        = this->options_.peelRtoMs;
     cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+    cfg.reno_dupack_pct = this->options_.peelRenoDupackPct;
+    cfg.reno_tagg_ms = this->options_.peelRenoTaggMs;
+    cfg.reno_ooo_buffer_segments =
+        static_cast<uint32_t>(this->options_.peelRenoOooBuf);
+    cfg.reno_rto_reset_on_ack = this->options_.peelRenoRtoResetOnAck;
 
     sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
-    GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+    GLOO_ENFORCE(
+        useReno_ ? sharedCtx_->initRingReno() : sharedCtx_->initRing(),
+        "PeelContext ring init failed");
   }
 
   void run() override {
@@ -1117,6 +1127,7 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
 
  protected:
   BarrierOptions barrierOpts_;
+  bool useReno_;
 };
 
 // =============================================================================
@@ -1726,6 +1737,11 @@ std::mutex PeelAllreduceRingBenchmark<T>::initMutex_;
   } else if (x.benchmark == "peel_broadcast_ring") {                           \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelBroadcastRingBenchmark<T>>(context, x);     \
+    };                                                                         \
+  } else if (x.benchmark == "peel_broadcast_ring_reno") {                      \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelBroadcastRingBenchmark<T>>(                 \
+          context, x, true);                                                   \
     };                                                                         \
   } else if (                                                                 \
       x.benchmark == "broadcast_stop_and_wait" ||                             \

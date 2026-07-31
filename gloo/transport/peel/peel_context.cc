@@ -38,6 +38,10 @@ static PeelTransportConfig makeBaseTransportConfig(const PeelContextConfig& c) {
     tc.max_chunk_size = c.max_chunk_size;
     tc.dscp           = c.dscp;
     tc.sender_rank    = c.sender_rank;
+    tc.reno_dupack_pct = c.reno_dupack_pct;
+    tc.reno_tagg_ms = c.reno_tagg_ms;
+    tc.reno_ooo_buffer_segments = c.reno_ooo_buffer_segments;
+    tc.reno_rto_reset_on_ack = c.reno_rto_reset_on_ack;
     return tc;
 }
 
@@ -152,6 +156,16 @@ bool PeelContext::initSingleTransport() {
 }
 
 bool PeelContext::initRing() {
+    return initRingWithCongestionControl(
+        PeelCongestionControl::StopAndWait);
+}
+
+bool PeelContext::initRingReno() {
+    return initRingWithCongestionControl(PeelCongestionControl::Reno);
+}
+
+bool PeelContext::initRingWithCongestionControl(
+        PeelCongestionControl mode) {
     ring_transports_.clear();
     ring_hops_.clear();
     broadcast_ring_.reset();
@@ -179,6 +193,7 @@ bool PeelContext::initRing() {
         // this hop and skip it in PeelBroadcastRing::run().
         if (config_.rank == sender || config_.rank == receiver) {
             PeelTransportConfig tc = makeBaseTransportConfig(config_);
+            tc.congestion_control = mode;
             tc.participant_ranks = {sender, receiver};
             tc.sender_rank = sender;
             tc.base_port = static_cast<uint16_t>(

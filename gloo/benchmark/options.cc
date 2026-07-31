@@ -75,8 +75,12 @@ static void usage(int status, const char* argv0) {
   X("      --peel-sender-rank=N       Broadcast root rank (default: 0)");
   X("      --peel-topology-file=PATH  Topology file (required for tree mode)");
   X("      --peel-parallel            Allgather: run N broadcasts concurrently (default: sequential)");
-  X("      --peel-rto=MS              Stop-and-wait retransmission timeout in ms (default: 500)");
+  X("      --peel-rto=MS              Initial retransmission timeout in ms (default: 500)");
   X("      --peel-max-payload=BYTES   Max app payload per Peel packet; 0 = MTU auto (default: 0)");
+  X("      --peel-reno-dupack-pct=PCT Fast-retransmit receiver threshold (default: 50)");
+  X("      --peel-reno-tagg=MS        Duplicate-ACK aggregation window (default: 100)");
+  X("      --peel-reno-ooo-buf=N      Receiver out-of-order slots (default: 64)");
+  X("      --peel-reno-rto-reset-on-ack=BOOL Reset backed-off RTO on progress (default: true)");
   X("");
   X("Benchmark parameters:");
   X("      --no-verify        Do not verify results of first iteration");
@@ -122,6 +126,7 @@ static void usage(int status, const char* argv0) {
   X("  isendirecv_stress");
   X("  peel_broadcast");
   X("  peel_broadcast_ring");
+  X("  peel_broadcast_ring_reno");
   X("  peel_broadcast_stop_and_wait");
   X("  peel_allgather");
   X("  peel_allgather_ring");
@@ -213,6 +218,10 @@ struct options parseOptions(int argc, char** argv) {
       {"help", no_argument, nullptr, 0xffff},
       {"peel-rto",           required_argument, nullptr, 0x3008},
       {"peel-max-payload",   required_argument, nullptr, 0x3009},
+      {"peel-reno-dupack-pct", required_argument, nullptr, 0x300a},
+      {"peel-reno-tagg", required_argument, nullptr, 0x300b},
+      {"peel-reno-ooo-buf", required_argument, nullptr, 0x300c},
+      {"peel-reno-rto-reset-on-ack", required_argument, nullptr, 0x300d},
       {nullptr, 0, nullptr, 0}};
 
   int opt;
@@ -418,6 +427,28 @@ struct options parseOptions(int argc, char** argv) {
       case 0x3009:
       {
         result.peelMaxPayload = atoi(optarg);
+        break;
+      }
+      case 0x300a:
+      {
+        result.peelRenoDupackPct = static_cast<float>(atof(optarg));
+        break;
+      }
+      case 0x300b:
+      {
+        result.peelRenoTaggMs = atoi(optarg);
+        break;
+      }
+      case 0x300c:
+      {
+        result.peelRenoOooBuf = atoi(optarg);
+        break;
+      }
+      case 0x300d:
+      {
+        result.peelRenoRtoResetOnAck =
+            atoi(optarg) == 1 || tolower(optarg[0]) == 't' ||
+            tolower(optarg[0]) == 'y';
         break;
       }
       case 0xffff:
