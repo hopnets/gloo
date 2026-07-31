@@ -943,12 +943,17 @@ class NewAllreduceBenchmark : public Benchmark<T> {
 
 template <typename T>
 class PeelBroadcastBenchmark : public Benchmark<T> {
-  using Benchmark<T>::Benchmark;
-
   static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
   static std::mutex initMutex_;
+  bool useReno_;
 
  public:
+  PeelBroadcastBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options,
+      bool useReno = false)
+      : Benchmark<T>(context, options), useReno_(useReno) {}
+
   void initialize(size_t elements) override {
     GLOO_ENFORCE(
         !this->options_.peelIface.empty(),
@@ -981,7 +986,8 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
     dc.world_size   = this->context_->size;
     dc.redis_host   = this->options_.redisHost;
     dc.redis_port   = this->options_.redisPort;
-    dc.redis_prefix = this->options_.prefix + "/peel_ip";
+    dc.redis_prefix = this->options_.prefix +
+        (useReno_ ? "/peel_reno_ip" : "/peel_ip");
     dc.iface_name   = this->options_.peelIface;
     dc.timeout_ms   = 300000;
 
@@ -1000,9 +1006,16 @@ class PeelBroadcastBenchmark : public Benchmark<T> {
     cfg.topology_file = this->options_.peelTopologyFile;
     cfg.rto_ms        = this->options_.peelRtoMs;
     cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+    cfg.reno_dupack_pct = this->options_.peelRenoDupackPct;
+    cfg.reno_tagg_ms = this->options_.peelRenoTaggMs;
+    cfg.reno_ooo_buffer_segments =
+        static_cast<uint32_t>(this->options_.peelRenoOooBuf);
+    cfg.reno_rto_reset_on_ack = this->options_.peelRenoRtoResetOnAck;
 
     sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
-    GLOO_ENFORCE(sharedCtx_->init(), "PeelContext init failed");
+    GLOO_ENFORCE(
+        useReno_ ? sharedCtx_->initReno() : sharedCtx_->init(),
+        "PeelContext init failed");
   }
 
   void run() override {
@@ -1149,8 +1162,6 @@ class PeelBroadcastRingBenchmark : public Benchmark<T> {
 // =============================================================================
 template <typename T>
 class PeelAllgatherBenchmark : public Benchmark<T> {
-  using Benchmark<T>::Benchmark;
-
   // Shared across the benchmark lifetime (threads=1 enforced).
   static std::shared_ptr<transport::peel::PeelAllgather>            sharedAllgather_;
   static std::vector<std::shared_ptr<transport::peel::PeelContext>> sharedCtxs_;
@@ -1160,8 +1171,15 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
   std::vector<std::vector<T>> recvBufs_; // one zeroed buffer per r != rank
   std::vector<void*>          bufPtrs_;  // [rank]=inputs_[0], [r≠rank]=recvBufs_[r]
   size_t                      dataBytes_ = 0;
+  bool                        useReno_;
 
  public:
+  PeelAllgatherBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options,
+      bool useReno = false)
+      : Benchmark<T>(context, options), useReno_(useReno) {}
+
   void initialize(size_t elements) override {
     GLOO_ENFORCE(
         !this->options_.peelIface.empty(),
@@ -1211,7 +1229,8 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
     dc.world_size   = worldSize;
     dc.redis_host   = this->options_.redisHost;
     dc.redis_port   = this->options_.redisPort;
-    dc.redis_prefix = this->options_.prefix + "/peel_ag_ip";
+    dc.redis_prefix = this->options_.prefix +
+        (useReno_ ? "/peel_ag_reno_ip" : "/peel_ag_ip");
     dc.iface_name   = this->options_.peelIface;
     dc.timeout_ms   = 300000;
 
@@ -1234,10 +1253,15 @@ class PeelAllgatherBenchmark : public Benchmark<T> {
       cfg.topology_file = this->options_.peelTopologyFile;
       cfg.rto_ms        = this->options_.peelRtoMs;
       cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+      cfg.reno_dupack_pct = this->options_.peelRenoDupackPct;
+      cfg.reno_tagg_ms = this->options_.peelRenoTaggMs;
+      cfg.reno_ooo_buffer_segments =
+          static_cast<uint32_t>(this->options_.peelRenoOooBuf);
+      cfg.reno_rto_reset_on_ack = this->options_.peelRenoRtoResetOnAck;
 
       sharedCtxs_[r] = std::make_shared<transport::peel::PeelContext>(cfg);
       GLOO_ENFORCE(
-          sharedCtxs_[r]->init(),
+          useReno_ ? sharedCtxs_[r]->initReno() : sharedCtxs_[r]->init(),
           "PeelContext init failed for sender_rank=", r);
       ctxPtrs[r] = sharedCtxs_[r].get();
     }
@@ -1411,16 +1435,21 @@ std::mutex PeelAllgatherBenchmark<T>::initMutex_;
 // =============================================================================
 template <typename T>
 class PeelAllgatherRingBenchmark : public Benchmark<T> {
-  using Benchmark<T>::Benchmark;
-
   static std::shared_ptr<transport::peel::PeelContext> sharedCtx_;
   static std::mutex initMutex_;
 
   std::vector<std::vector<T>> recvBufs_;
   std::vector<void*> bufPtrs_;
   size_t dataBytes_ = 0;
+  bool useReno_;
 
  public:
+  PeelAllgatherRingBenchmark(
+      std::shared_ptr<::gloo::Context>& context,
+      struct options& options,
+      bool useReno = false)
+      : Benchmark<T>(context, options), useReno_(useReno) {}
+
   void initialize(size_t elements) override {
     GLOO_ENFORCE(
         !this->options_.peelIface.empty(),
@@ -1456,7 +1485,8 @@ class PeelAllgatherRingBenchmark : public Benchmark<T> {
     dc.world_size   = worldSize;
     dc.redis_host   = this->options_.redisHost;
     dc.redis_port   = this->options_.redisPort;
-    dc.redis_prefix = this->options_.prefix + "/peel_ag_ring_ip";
+    dc.redis_prefix = this->options_.prefix +
+        (useReno_ ? "/peel_ag_ring_reno_ip" : "/peel_ag_ring_ip");
     dc.iface_name   = this->options_.peelIface;
     dc.timeout_ms   = 300000;
 
@@ -1475,9 +1505,16 @@ class PeelAllgatherRingBenchmark : public Benchmark<T> {
     cfg.topology_file = this->options_.peelTopologyFile;
     cfg.rto_ms        = this->options_.peelRtoMs;
     cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+    cfg.reno_dupack_pct = this->options_.peelRenoDupackPct;
+    cfg.reno_tagg_ms = this->options_.peelRenoTaggMs;
+    cfg.reno_ooo_buffer_segments =
+        static_cast<uint32_t>(this->options_.peelRenoOooBuf);
+    cfg.reno_rto_reset_on_ack = this->options_.peelRenoRtoResetOnAck;
 
     sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
-    GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+    GLOO_ENFORCE(
+        useReno_ ? sharedCtx_->initRingReno() : sharedCtx_->initRing(),
+        "PeelContext ring init failed");
   }
 
   void run() override {
@@ -1532,8 +1569,10 @@ class PeelAllreduceRingBenchmark : public Benchmark<T> {
  public:
   PeelAllreduceRingBenchmark(
       std::shared_ptr<::gloo::Context>& context,
-      struct options& options)
-      : Benchmark<T>(context, options), barrierOpts_(context) {
+      struct options& options,
+      bool useReno = false)
+      : Benchmark<T>(context, options),
+        barrierOpts_(context), useReno_(useReno) {
     barrierOpts_.setTag(0xBADC0DE4);
   }
 
@@ -1562,7 +1601,8 @@ class PeelAllreduceRingBenchmark : public Benchmark<T> {
         dc.world_size   = worldSize;
         dc.redis_host   = this->options_.redisHost;
         dc.redis_port   = this->options_.redisPort;
-        dc.redis_prefix = this->options_.prefix + "/peel_ar_ring_ip";
+        dc.redis_prefix = this->options_.prefix +
+            (useReno_ ? "/peel_ar_ring_reno_ip" : "/peel_ar_ring_ip");
         dc.iface_name   = this->options_.peelIface;
         dc.timeout_ms   = 300000;
 
@@ -1581,9 +1621,16 @@ class PeelAllreduceRingBenchmark : public Benchmark<T> {
         cfg.topology_file = this->options_.peelTopologyFile;
         cfg.rto_ms        = this->options_.peelRtoMs;
         cfg.max_chunk_size = static_cast<size_t>(this->options_.peelMaxPayload);
+        cfg.reno_dupack_pct = this->options_.peelRenoDupackPct;
+        cfg.reno_tagg_ms = this->options_.peelRenoTaggMs;
+        cfg.reno_ooo_buffer_segments =
+            static_cast<uint32_t>(this->options_.peelRenoOooBuf);
+        cfg.reno_rto_reset_on_ack = this->options_.peelRenoRtoResetOnAck;
 
         sharedCtx_ = std::make_shared<transport::peel::PeelContext>(cfg);
-        GLOO_ENFORCE(sharedCtx_->initRing(), "PeelContext ring init failed");
+        GLOO_ENFORCE(
+            useReno_ ? sharedCtx_->initRingReno() : sharedCtx_->initRing(),
+            "PeelContext ring init failed");
       }
     }
 
@@ -1608,6 +1655,7 @@ class PeelAllreduceRingBenchmark : public Benchmark<T> {
  protected:
   std::unique_ptr<transport::peel::PeelAllreduceRing<T>> algorithm_;
   BarrierOptions barrierOpts_;
+  bool useReno_;
 };
 
 template <typename T>
@@ -1734,6 +1782,11 @@ std::mutex PeelAllreduceRingBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelBroadcastBenchmark<T>>(context, x);         \
     };                                                                         \
+  } else if (x.benchmark == "peel_broadcast_reno") {                           \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelBroadcastBenchmark<T>>(                     \
+          context, x, true);                                                   \
+    };                                                                         \
   } else if (x.benchmark == "peel_broadcast_ring") {                           \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelBroadcastRingBenchmark<T>>(context, x);     \
@@ -1754,14 +1807,29 @@ std::mutex PeelAllreduceRingBenchmark<T>::initMutex_;
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherBenchmark<T>>(context, x);         \
     };                                                                         \
+  } else if (x.benchmark == "peel_allgather_reno") {                           \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllgatherBenchmark<T>>(                     \
+          context, x, true);                                                   \
+    };                                                                         \
   } else if (x.benchmark == "peel_allgather_ring") {                           \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllgatherRingBenchmark<T>>(context, x);     \
+    };                                                                         \
+  } else if (x.benchmark == "peel_allgather_ring_reno") {                      \
+    fn = [&](std::shared_ptr<Context>& context) {                              \
+      return gloo::make_unique<PeelAllgatherRingBenchmark<T>>(                 \
+          context, x, true);                                                   \
     };                                                                         \
   } else if (x.benchmark == "peel_allreduce_ring") {                          \
     fn = [&](std::shared_ptr<Context>& context) {                              \
       return gloo::make_unique<PeelAllreduceRingBenchmark<T>>(context, x);     \
     };                                                                         \
+  } else if (x.benchmark == "peel_allreduce_ring_reno") {                     \
+    fn = [&](std::shared_ptr<Context>& context) {                             \
+      return gloo::make_unique<PeelAllreduceRingBenchmark<T>>(                \
+          context, x, true);                                                  \
+    };                                                                        \
   }                                                                            \
   if (!fn) {                                                                   \
     GLOO_ENFORCE(false, "Invalid algorithm: ", x.benchmark);                 \

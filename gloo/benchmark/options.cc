@@ -125,12 +125,16 @@ static void usage(int status, const char* argv0) {
   X("  sendrecv_stress");
   X("  isendirecv_stress");
   X("  peel_broadcast");
+  X("  peel_broadcast_reno");
   X("  peel_broadcast_ring");
   X("  peel_broadcast_ring_reno");
   X("  peel_broadcast_stop_and_wait");
   X("  peel_allgather");
+  X("  peel_allgather_reno");
   X("  peel_allgather_ring");
+  X("  peel_allgather_ring_reno");
   X("  peel_allreduce_ring");
+  X("  peel_allreduce_ring_reno");
   X("  broadcast_ring");
   X("  broadcast_stop_and_wait");
   X("");

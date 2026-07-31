@@ -75,6 +75,7 @@ public:
     // populated, builds a PeelTree and creates one transport per subtree.
     // Otherwise falls back to a single flat transport (all ranks, no CIDR).
     bool init();
+    bool initReno();
 
     // True when all transports are ready.
     bool isReady() const;
@@ -101,7 +102,8 @@ public:
 private:
     // Fallback path: one transport, all ranks, no CIDR rules.
     // Used when no topology file is provided or peer_ips is empty.
-    bool initSingleTransport();
+    bool initWithCongestionControl(PeelCongestionControl mode);
+    bool initSingleTransport(PeelCongestionControl mode);
     bool initRingWithCongestionControl(PeelCongestionControl mode);
 
     PeelContextConfig                           config_;
