@@ -1,4 +1,4 @@
-# GLOO_SRCS is the list of source files that we need to build libgloo.
+# GLOO_SRCS is the list of source files that we need to build libgloo. 
 set(GLOO_SRCS)
 
 # GLOO_HDRS is the list of header files that we need to install.
